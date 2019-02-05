@@ -1,13 +1,17 @@
 # This script requires python 3
 __all__ = ["logging", "bnilvisitor", "UnlockVisitor"]
 from binaryninja import (
+    ArchitectureHook,
     AnalysisCompletionEvent,
     Architecture,
     BasicBlock,
     BinaryDataNotification,
+    InstructionBranch,
     BinaryView,
+    BranchType,
     Function,
     ILBranchDependence,
+    LowLevelILFunction,
     MediumLevelILFunction,
     MediumLevelILInstruction,
     MediumLevelILOperation,
@@ -23,7 +27,10 @@ from binaryninja import (
     LowLevelILOperation,
     SectionSemantics,
     SSAVariable,
+    log_info,
+    InstructionInfo,
 )
+from binaryninja import _binaryninjacore as core
 from queue import Queue
 from threading import Event
 from functools import partial
@@ -229,9 +236,9 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
 
     def visit_MLIL_XOR(self, expr):
         log_debug("visit_MLIL_XOR")
-        
+
         # If it's something like `ecx ^ const` and ecx isn't a known
-        # value, then just erase it. It's not needed at all. 
+        # value, then just erase it. It's not needed at all.
         if expr.left.value.type in (
             RegisterValueType.UndeterminedValue,
             RegisterValueType.EntryValue,
@@ -246,7 +253,7 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             )
             if current_bb.start != expr.address or len(current_bb.incoming_edges) > 1:
                 # TODO: deal with multiple incoming edges... probably just add them to queue?
-            self.target_queue.put(expr.function[expr.instr_index + 1].address)
+                self.target_queue.put(expr.function[expr.instr_index + 1].address)
             else:
                 previous_bb = current_bb.incoming_edges[0].source
                 prev_il = self.function.get_low_level_il_at(previous_bb.start).mmlil
@@ -293,3 +300,48 @@ class UnlockCompletionEvent(AnalysisCompletionEvent):
     def run_next(self):
         log_debug("Setting analysis_complete")
         self.unlock.analysis_complete.set()
+
+
+class ReturnHook(ArchitectureHook):
+    def get_instruction_low_level_il(self, data, addr, il: LowLevelILFunction):
+        result: InstructionInfo = super(ReturnHook, self).get_instruction_info(
+            data, addr
+        )
+
+        if result is None:
+            return
+
+        ret_branch = next(
+            (
+                branch
+                for branch in result.branches
+                if branch is not None and branch.type == BranchType.FunctionReturn
+            ),
+            None,
+        )
+
+        if ret_branch is not None:
+            print(f"{addr:x} is a return type")
+            il.append(il.jump(il.pop(4)))
+            return result.length
+
+        true = next(
+            (
+                branch for branch in result.branches
+                if branch is not None and branch.type == BranchType.TrueBranch
+            ),
+            None,
+        )
+        
+        if true is not None:
+            print(f'{addr:x} is an if')
+            il.append(il.jump(il.const_pointer(4, true.target)))
+            return result.length
+
+        super(ReturnHook, self).get_instruction_low_level_il(data, addr, il)
+
+        return result.length
+
+
+ReturnHook(Architecture["x86"]).register()
+
