@@ -28,6 +28,7 @@ from queue import Queue
 from threading import Event
 from functools import partial
 import operator as op
+import time
 
 from .analysis.analyze_return import analyze_return
 from .analysis.analyze_unconditional_jump import analyze_unconditional_jump
@@ -38,7 +39,7 @@ from .analysis.analyze_exception_handler import (
     analyze_exception_handler_set_var,
 )
 from .analysis.analyze_unwind import analyze_unwind
-from .analysis.analyze_folding import analyze_goto_folding
+from .analysis.analyze_folding import analyze_goto_folding, analyze_constant_folding
 from .bnilvisitor import BNILVisitor
 from .logging import log_debug
 
@@ -77,9 +78,11 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
         self.seh = []
         self.seen = {}
         self.analysis_complete = Event()
+
         self.target_queue.put(start)
 
     def run(self):
+        self.start_time = time.time()
         while not self.target_queue.empty():
             self.addr = None
             while not self.target_queue.empty():
@@ -89,15 +92,17 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
                     # can't, then it's not a valid instruction
                     # currently
                     # valid = self.view.navigate(self.view.file.view, self.addr)
+                    log_debug(f"checking validity of {self.addr:x}")
                     valid = self.view.get_functions_containing(self.addr) is not None
                     if not valid:
+                        log_debug(f"{self.addr:x} is not valid")
                         self.addr = None
                         continue
                     else:
                         break
             else:
                 log_debug("target queue has been exhausted")
-                return
+                break
 
             log_debug(f"run for {self.addr:x} started")
 
@@ -148,7 +153,7 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
                 try:
                     il = mmlil[next_il]
                 except:
-                    return
+                    break
 
             log_debug(f"analysis for {il.address:x} finished")
             if not process_result:
@@ -160,15 +165,33 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             log_debug("analysis complete")
 
         log_debug("target queue is empty")
+        self.end_time = time.time()
+
+        log_info(f"Unlock complete; Time elapsed: {self.end_time - self.start_time}")
 
     visit_MLIL_RET = analyze_return
     visit_MLIL_RET_HINT = analyze_return
 
-    visit_MLIL_JUMP = analyze_indirect_jump
+    def visit_MLIL_JUMP(self, expr):
+        result = self.visit(expr.dest.llil)
+
+        if result is True:
+            return result
+
+        return self.analyze_indirect_jump(expr)
+
+    def visit_MLIL_JUMP_TO(self, expr):
+        return self.visit(expr.dest.llil)
+
     visit_MLIL_GOTO = analyze_goto_folding
 
     visit_MLIL_STORE = analyze_exception_handler_store
     visit_MLIL_SET_VAR = analyze_exception_handler_set_var
+
+    visit_LLIL_REG_SSA = analyze_constant_folding
+
+    def visit_MLIL_SET_VAR_FIELD(self, expr):
+        return self.visit(expr.src)
 
     def visit_MLIL_IF(self, expr):
         log_debug("visit_MLIL_IF")
@@ -187,6 +210,23 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
         # else from the target queue.
         return False
 
+    def visit_LLIL_LOAD_SSA(self, expr):
+        return self.visit(expr.src)
+
+    def visit_LLIL_ADD(self, expr):
+        log_debug("visit_MLIL_ADD")
+        add_value = expr.value
+        if add_value.type in (
+            RegisterValueType.ConstantPointerValue,
+            RegisterValueType.ConstantValue,
+        ):
+            log_debug(f"add value is {add_value.value:x}")
+            return self.analyze_constant_folding(expr.left)
+        else:
+            log_debug(f"add value is not constant ptr")
+
+        return
+
     def visit_MLIL_XOR(self, expr):
         log_debug("visit_MLIL_XOR")
         
@@ -197,20 +237,50 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             RegisterValueType.EntryValue,
         ):
             self.view.convert_to_nop(expr.address)
+
+            # get the previous basic block
+            current_bb = next(
+                bb
+                for bb in self.view.get_basic_blocks_at(expr.address)
+                if bb.function == self.function
+            )
+            if current_bb.start != expr.address or len(current_bb.incoming_edges) > 1:
+                # TODO: deal with multiple incoming edges... probably just add them to queue?
             self.target_queue.put(expr.function[expr.instr_index + 1].address)
+            else:
+                previous_bb = current_bb.incoming_edges[0].source
+                prev_il = self.function.get_low_level_il_at(previous_bb.start).mmlil
+
+                if prev_il is None:
+                    log_debug("prev_il was None for some reason")
+                    return False
+
+                while prev_il.operation != MediumLevelILOperation.MLIL_GOTO:
+                    try:
+                        prev_il = expr.function[prev_il.instr_index + 1]
+                    except Exception as e:
+                        # something went wrong here. Bail on this path
+                        log_debug(f"Something went wrong iterating over prev_il: {e}")
+                        return False
+
+                self.target_queue.put(prev_il.address)
+
             return True
 
-    def visit_MLIL_TAIL_CALL(self, expr):
+    def visit_MLIL_TAILCALL(self, expr):
         log_debug("visit_MLIL_TAIL_CALL")
         # TODO: implement something to recover control flow
         # for tail calls
+        return self.visit(expr.dest.llil)
 
-        return False
+    visit_MLIL_TAILCALL_UNTYPED = visit_MLIL_TAILCALL
 
     analyze_opaque_predicate = analyze_opaque_predicate
     analyze_unconditional_jump = analyze_unconditional_jump
+    analyze_indirect_jump = analyze_indirect_jump
     analyze_unwind = analyze_unwind
     analyze_goto_folding = analyze_goto_folding
+    analyze_constant_folding = analyze_constant_folding
 
 
 class UnlockCompletionEvent(AnalysisCompletionEvent):

@@ -10,7 +10,7 @@ from ..logging import log_debug
 
 
 def analyze_unwind(self, expr: MediumLevelILInstruction):
-
+    log_debug("analyze_unwind")
     if expr.src.value.type not in (
         RegisterValueType.ConstantPointerValue,
         RegisterValueType.ConstantValue,
@@ -20,13 +20,14 @@ def analyze_unwind(self, expr: MediumLevelILInstruction):
     is_stack_var = UnwindVisitor().visit(expr)
 
     if is_stack_var:
+        log_debug("Stack manipulation found; Starting unwind...")
         self.in_exception = False
         self.unwinding = True
         next_il = expr.function[expr.instr_index + 1]
         patch_value = self.view.arch.assemble(
             f"jmp 0x{expr.src.value.value:x}", next_il.address
         )
-        if self.get_instruction_length(next_il.address) >= patch_value:
+        if self.view.get_instruction_length(next_il.address) >= len(patch_value):
             self.view.write(
                 next_il.address,
                 patch_value,
@@ -38,12 +39,12 @@ def analyze_unwind(self, expr: MediumLevelILInstruction):
             log_debug(f'{next_il.address:x} is not big enough for a patch')
             return False
 
+    log_debug("This store does not manipulate the unwind.")
     return False
 
 
 class UnwindVisitor(BNILVisitor):
     def visit_MLIL_STORE(self, expr):
-        print(expr)
         function = expr.function
 
         if expr.dest.operation != MediumLevelILOperation.MLIL_VAR:
@@ -54,11 +55,9 @@ class UnwindVisitor(BNILVisitor):
         return self.visit(function[function.get_ssa_var_definition(dest_ssa)])
 
     def visit_MLIL_SET_VAR(self, expr):
-        print(expr)
         return self.visit(expr.src)
 
     def visit_MLIL_ADD(self, expr):
-        print(expr)
         left = self.visit(expr.left)
         right = self.visit(expr.right)
 
@@ -70,10 +69,8 @@ class UnwindVisitor(BNILVisitor):
         return False
 
     def visit_MLIL_VAR(self, expr):
-        print(expr)
         function = expr.function
         var = expr.src
-        print(var.source_type)
         if var.source_type == VariableSourceType.StackVariableSourceType:
             return True
         else:
