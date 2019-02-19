@@ -22,6 +22,7 @@ def analyze_return(self, expr: MediumLevelILInstruction):
     )
 
     if current_sp.type != RegisterValueType.StackFrameOffset:
+        log_debug(f'{current_sp.type!r} != RegisterValueType.StackFrameOffset')
         return False
 
     current_sp: int = current_sp.offset
@@ -33,6 +34,7 @@ def analyze_return(self, expr: MediumLevelILInstruction):
     if next_jump_value.type == RegisterValueType.ConstantValue:
         next_jump_addr: int = next_jump_value.value
     else:
+        log_debug(f"next_jump_value is not a constant: {next_jump_value.type!r}")
         return False
 
     # Step 3: identify the start of this primitive – we assume that the
@@ -41,7 +43,15 @@ def analyze_return(self, expr: MediumLevelILInstruction):
     # the return address will always be on the left side of said operation.
     ret_il_ssa = expr.ssa_form
     jump_variable_ssa = ret_il_ssa.dest.src
-    jump_il = mmlil[mmlil.get_ssa_var_definition(jump_variable_ssa)]
+
+    jump_variable_def = mmlil.get_ssa_var_definition(jump_variable_ssa)
+
+    if jump_variable_ssa is None:
+        log_debug("wtf why is this magically None?")
+        log_debug(f"{ret_il_ssa}")
+        return False
+
+    jump_il = mmlil[jump_variable_def]
     while jump_il.src.operation != MediumLevelILOperation.MLIL_CONST:
         new_var_ssa = jump_il.src.left.ssa_form.src
         jump_il = mmlil[mmlil.get_ssa_var_definition(new_var_ssa)]

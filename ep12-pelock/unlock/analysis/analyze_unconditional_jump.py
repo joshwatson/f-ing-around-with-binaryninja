@@ -50,7 +50,6 @@ def analyze_unconditional_jump(self, expr):
             pass
 
     # step 2: get our mlil basic block
-    # print("Step 2")
     for bb in mmlil.basic_blocks:
         if bb.start <= expr.instr_index < bb.end:
             first_jump_bb = bb
@@ -60,7 +59,6 @@ def analyze_unconditional_jump(self, expr):
         return False
 
     # step 3: look for all the returns
-    # print("Step 3")
     returns = []
 
     for idx in range(expr.instr_index + 1, len(mmlil)):
@@ -79,7 +77,6 @@ def analyze_unconditional_jump(self, expr):
 
     # step 4: find the unconditional jump
     # TODO: switch not_unconditional to a set and do the difference
-    # print("Step 4")
     unconditional_target = (
         mmlil[expr.true]
         if expr.instr_index not in mmlil[expr.true].branch_dependence
@@ -98,8 +95,6 @@ def analyze_unconditional_jump(self, expr):
         false_target = mmlil[expr.false].address
 
         # try to get the BinaryView to trigger analysis when we leave
-        # print("Adding false branch to queue")
-
         false_seen_target = self.seen.get(false_target, 0)
         if false_seen_target < 10:
             log_debug(f"{false_target:x} seen {false_seen_target}")
@@ -114,14 +109,12 @@ def analyze_unconditional_jump(self, expr):
     bb = get_mmlil_bb(mmlil, unconditional_target.instr_index)
 
     # make sure first jump dominates
-    # print("Step 5")
     if first_jump_bb not in bb.dominators:
         log_debug(f"first_jump_bb not in bb.dominators for {bb[0].address:x}")
         return False
 
     # find the ret that is dependent on first jump and another jump
     # and both need to have the same type of branch
-    # print("Step 6")
 
     for ret in not_unconditional:
         dependence = ret.branch_dependence
@@ -156,7 +149,6 @@ def analyze_unconditional_jump(self, expr):
         log_debug("Second Jump is None")
         return False
 
-    # print("Step 7")
     if expr.condition.operation == MediumLevelILOperation.MLIL_VAR:
         # This could be an if (flag:o) and an if (!(flag:o))
         if second_jump.condition.operation != MediumLevelILOperation.MLIL_NOT:
@@ -184,8 +176,6 @@ def analyze_unconditional_jump(self, expr):
         return False
 
     # make sure the operands are the same
-    # print("Step 8")
-    # print(f'{first_jump_condition.address:x}, {second_jump_condition.address:x}')
     first_ops = ConditionVisitor().visit(first_jump_condition)
     second_ops = ConditionVisitor().visit(second_jump_condition)
 
@@ -206,14 +196,12 @@ def analyze_unconditional_jump(self, expr):
 
     if branch_type == ILBranchDependence.FalseBranchDependent:
         target = mmlil[expr.true].address
-        # print(f'Jumping to {target:x}')
 
         patch_value = view.arch.always_branch(
             view.read(patch_addr, view.get_instruction_length(patch_addr)), patch_addr
         )
     else:
         target = mmlil[expr.false].address
-        # print(f'Jumping to {target:x}')
 
         patch_value = view.arch.never_branch(
             view.read(patch_addr, view.get_instruction_length(patch_addr)), patch_addr

@@ -11,19 +11,24 @@ from ..logging import log_debug
 
 def analyze_unwind(self, expr: MediumLevelILInstruction):
     log_debug("analyze_unwind")
+
     if expr.src.value.type not in (
         RegisterValueType.ConstantPointerValue,
         RegisterValueType.ConstantValue,
     ):
         return False
 
-    is_stack_var = UnwindVisitor().visit(expr)
+    visitor = UnwindVisitor()
+    is_stack_var = visitor.visit(expr)
 
-    if is_stack_var:
+    if is_stack_var is not False:
         log_debug("Stack manipulation found; Starting unwind...")
         self.in_exception = False
         self.unwinding = True
         next_il = expr.function[expr.instr_index + 1]
+
+        self.view.convert_to_nop(is_stack_var)
+
         patch_value = self.view.arch.assemble(
             f"jmp 0x{expr.src.value.value:x}", next_il.address
         )
@@ -34,6 +39,12 @@ def analyze_unwind(self, expr: MediumLevelILInstruction):
             )
 
             self.target_queue.put(next_il.address)
+
+            self.view.convert_to_nop(expr.address)
+
+            if hasattr(visitor, 'nop_address'):
+                self.view.convert_to_nop(visitor.nop_address)
+
             return True
         else:
             log_debug(f'{next_il.address:x} is not big enough for a patch')
@@ -66,13 +77,15 @@ class UnwindVisitor(BNILVisitor):
     visit_MLIL_SUB = visit_MLIL_ADD
 
     def visit_MLIL_CONST(self, expr):
+        if expr.constant == 0xb8:
+            self.nop_address = expr.address
         return False
 
     def visit_MLIL_VAR(self, expr):
         function = expr.function
         var = expr.src
         if var.source_type == VariableSourceType.StackVariableSourceType:
-            return True
+            return expr.address
         else:
             var_ssa = expr.ssa_form.src
             return self.visit(function[function.get_ssa_var_definition(var_ssa)])

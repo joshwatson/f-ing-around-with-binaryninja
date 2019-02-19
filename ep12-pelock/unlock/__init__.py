@@ -29,6 +29,8 @@ from binaryninja import (
     SSAVariable,
     log_info,
     InstructionInfo,
+    FunctionAnalysisSkipOverride,
+    LowLevelILExpr,
 )
 from binaryninja import _binaryninjacore as core
 from queue import Queue
@@ -40,7 +42,7 @@ import time
 from .analysis.analyze_return import analyze_return
 from .analysis.analyze_unconditional_jump import analyze_unconditional_jump
 from .analysis.analyze_opaque_predicate import analyze_opaque_predicate
-from .analysis.analyze_indirect_jump import analyze_indirect_jump
+from .analysis.analyze_indirect_jump import analyze_indirect_jump, analyze_possible_call
 from .analysis.analyze_exception_handler import (
     analyze_exception_handler_store,
     analyze_exception_handler_set_var,
@@ -82,6 +84,7 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
         self.push_seh = None
         self.in_exception = False
         self.unwinding = False
+        self.look_for_pop = False
         self.seh = []
         self.seen = {}
         self.analysis_complete = Event()
@@ -113,10 +116,6 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
 
             log_debug(f"run for {self.addr:x} started")
 
-            self.progress = f"Deobfuscating {self.addr:x}"
-
-            UnlockCompletionEvent(self)
-
             # Get a new copy of our Function object, since reanalyzing might
             # make dataflow stale
             log_debug(f"Getting new function for {self.addr:x}")
@@ -136,13 +135,17 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
 
             mmlil = il.function
 
+            self.progress = f"Deobfuscating {self.addr:x} in function {self.function.start:x} ({il.instr_index}/{len(list(mmlil.instructions))})"
+
             while True:
                 log_debug(f"analyzing {il.instr_index}: {il}")
 
+                # self.function.analysis_skipped = True
                 self.view.begin_undo_actions()
                 self.seen[il.address] = self.seen.get(il.address, 0) + 1
                 process_result = self.visit(il)
                 self.view.commit_undo_actions()
+                # self.function.analysis_skipped = False
 
                 # If it's True or False, then we've finished
                 # processing this path and want to continue
@@ -167,8 +170,7 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
                 self.function.reanalyze()
 
             log_debug("waiting for analysis to finish")
-            self.analysis_complete.wait()
-            self.analysis_complete.clear()
+            self.view.update_analysis_and_wait()
             log_debug("analysis complete")
 
         log_debug("target queue is empty")
@@ -195,7 +197,14 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
     visit_MLIL_STORE = analyze_exception_handler_store
     visit_MLIL_SET_VAR = analyze_exception_handler_set_var
 
-    visit_LLIL_REG_SSA = analyze_constant_folding
+    def visit_LLIL_REG_SSA(self, expr):
+        log_debug("visit_LLIL_REG_SSA")
+
+        if expr.value.type in (
+            RegisterValueType.ConstantPointerValue,
+            RegisterValueType.ConstantValue,
+        ):
+            return self.analyze_constant_folding(expr)
 
     def visit_MLIL_SET_VAR_FIELD(self, expr):
         return self.visit(expr.src)
@@ -221,7 +230,7 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
         return self.visit(expr.src)
 
     def visit_LLIL_ADD(self, expr):
-        log_debug("visit_MLIL_ADD")
+        log_debug("visit_LLIL_ADD")
         add_value = expr.value
         if add_value.type in (
             RegisterValueType.ConstantPointerValue,
@@ -233,6 +242,37 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             log_debug(f"add value is not constant ptr")
 
         return
+
+    def visit_MLIL_SUB(self, expr):
+        log_debug("visit_MLIL_SUB")
+
+        # This is a top level MLIL_SUB, which means it's probably a cmp instruction
+        if expr.function[expr.instr_index].operation == MediumLevelILOperation.MLIL_SUB:
+            return
+
+        if expr.left.value.type in (RegisterValueType.UndeterminedValue, RegisterValueType.EntryValue):
+            self.view.convert_to_nop(expr.address)
+            self.target_queue.put(expr.address)
+            return True
+
+        # sub_value = expr.value
+        # if sub_value.type in (
+        #     RegisterValueType.ConstantPointerValue,
+        #     RegisterValueType.ConstantValue,
+        # ):
+        #     log_debug(f"sub value is {sub_value.value:x}")
+        #     self.analyze_constant_folding(expr.left)
+        #     return False
+        # else:
+        #     log_debug("sub value is not a constant ptr")
+
+        # return
+
+    # def visit_MLIL_CONST(self, expr):
+    #     log_debug("visit_MLIL_CONST")
+
+    #     if expr.llil.operation != LowLevelILOperation.LLIL_CONST:
+    #         return self.visit(expr.llil)
 
     def visit_MLIL_XOR(self, expr):
         log_debug("visit_MLIL_XOR")
@@ -274,6 +314,8 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
 
             return True
 
+    visit_MLIL_AND = visit_MLIL_XOR
+
     def visit_MLIL_TAILCALL(self, expr):
         log_debug("visit_MLIL_TAIL_CALL")
         # TODO: implement something to recover control flow
@@ -288,60 +330,4 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
     analyze_unwind = analyze_unwind
     analyze_goto_folding = analyze_goto_folding
     analyze_constant_folding = analyze_constant_folding
-
-
-class UnlockCompletionEvent(AnalysisCompletionEvent):
-    def __init__(self, unlock: UnlockVisitor):
-        self.unlock = unlock
-        super(UnlockCompletionEvent, self).__init__(
-            unlock.view, UnlockCompletionEvent.run_next
-        )
-
-    def run_next(self):
-        log_debug("Setting analysis_complete")
-        self.unlock.analysis_complete.set()
-
-
-class ReturnHook(ArchitectureHook):
-    def get_instruction_low_level_il(self, data, addr, il: LowLevelILFunction):
-        result: InstructionInfo = super(ReturnHook, self).get_instruction_info(
-            data, addr
-        )
-
-        if result is None:
-            return
-
-        ret_branch = next(
-            (
-                branch
-                for branch in result.branches
-                if branch is not None and branch.type == BranchType.FunctionReturn
-            ),
-            None,
-        )
-
-        if ret_branch is not None:
-            print(f"{addr:x} is a return type")
-            il.append(il.jump(il.pop(4)))
-            return result.length
-
-        true = next(
-            (
-                branch for branch in result.branches
-                if branch is not None and branch.type == BranchType.TrueBranch
-            ),
-            None,
-        )
-        
-        if true is not None:
-            print(f'{addr:x} is an if')
-            il.append(il.jump(il.const_pointer(4, true.target)))
-            return result.length
-
-        super(ReturnHook, self).get_instruction_low_level_il(data, addr, il)
-
-        return result.length
-
-
-ReturnHook(Architecture["x86"]).register()
-
+    analyze_possible_call = analyze_possible_call
