@@ -4,6 +4,10 @@ from binaryninja import (
     MediumLevelILOperation,
     LowLevelILOperation,
     RegisterValueType,
+    Variable,
+    VariableSourceType,
+    SSAVariable,
+    MediumLevelILBasicBlock
 )
 
 from ..bnilvisitor import BNILVisitor
@@ -46,6 +50,9 @@ def analyze_indirect_jump(self, expr: MediumLevelILInstruction):
 def analyze_possible_call(self, expr: MediumLevelILInstruction):
     log_debug("analyze_possible_call")
 
+    if self.phase == 1:
+        return
+
     if expr.dest.operation != MediumLevelILOperation.MLIL_CONST_PTR:
         return
 
@@ -79,7 +86,47 @@ def analyze_possible_call(self, expr: MediumLevelILInstruction):
 
     self.view.write(expr.address, patch_value)
 
+    # Find the return address variable and remove it
+    return_addr_var = Variable(
+        self.function, VariableSourceType.StackVariableSourceType, 0, current_esp.offset
+    )
+
+    return_addr_version = expr.get_ssa_var_version(return_addr_var)
+
+    return_addr_ssa = SSAVariable(return_addr_var, return_addr_version)
+
+    # get the IL instructions of the definitions instead of the indices
+    return_addr_definitions = list(
+        map(
+            expr.function.__getitem__,
+            expr.function.get_var_definitions(return_addr_var),
+        )
+    )
+
+    current_bb = next(
+        bb
+        for bb in expr.function.basic_blocks
+        if bb.start <= expr.instr_index < bb.end
+    )
+
+    for instr in return_addr_definitions:
+        # get the IL basic block of this definition
+        instr_bb: MediumLevelILBasicBlock = next(
+            bb
+            for bb in expr.function.basic_blocks
+            if bb.start <= instr.instr_index < bb.end
+        )
+
+        if instr_bb in current_bb.dominators:
+            self.view.convert_to_nop(instr.address)
+
+    
+    self.target_queue.put(return_addr_definitions[0].address)
     self.target_queue.put(expr.dest.constant)
+
+    # Change the phase back to 1
+    self.prev_phase = self.phase
+    self.phase = 1
 
     return True
 

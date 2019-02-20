@@ -27,13 +27,13 @@ def analyze_constant_folding(self, expr):
     if None in (dependents, patch_value, patch_address):
         return False
 
-    if self.view.get_instruction_length(patch_address) < len(patch_value):
-        log_debug(f"{patch_address:x} is too few bytes to patch")
+    if self.view.get_instruction_length(patch_address.address) < len(patch_value):
+        log_debug(f"{patch_address.address:x} is too few bytes to patch")
         return False
 
     # First, convert to NOPs and *then* write the patch
-    self.view.convert_to_nop(patch_address)
-    self.view.write(patch_address, patch_value)
+    self.view.convert_to_nop(patch_address.address)
+    self.view.write(patch_address.address, patch_value)
 
     log_debug("NOPPING THE SHIT OUT OF THIS THING")
     # Nop all of the previous assignments
@@ -45,7 +45,7 @@ def analyze_constant_folding(self, expr):
     # place the last address on the queue, to fold
     # all the NOPs and GOTOs
     if dependents:
-        self.target_queue.put(patch_address)
+        self.target_queue.put(dependents[-1])
         return True
     else:
         return
@@ -113,7 +113,7 @@ def analyze_constant_folding_llil(self, expr):
         f"mov {reg_name}, 0x{reg_value.value:x}", reg_def.address
     )
 
-    return dependent_regs, patch_value, reg_def.address
+    return dependent_regs, patch_value, reg_def
 
 
 def analyze_constant_folding_mlil(self, expr):
@@ -171,7 +171,7 @@ def analyze_constant_folding_mlil(self, expr):
     return (
         [i.address for i in dependents] + [expr.address],
         patch_value,
-        patch_var.address,
+        patch_var,
     )
 
 

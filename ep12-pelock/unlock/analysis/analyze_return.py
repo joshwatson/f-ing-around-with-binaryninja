@@ -70,7 +70,9 @@ def analyze_return(self, expr: MediumLevelILInstruction):
     self.view.write(patch_addr, patch_value)
     log_debug(f"Patched {patch_addr:x} with new jump target")
 
-    log_debug(f"adding {next_jump_addr:x} to target queue")
-    self.target_queue.put(next_jump_addr)
+    # log_debug(f"adding {next_jump_addr:x} to target queue")
+    # self.target_queue.put(next_jump_addr)
 
-    return True
+    # return True
+
+    return self.queue_prev_block(jump_il)

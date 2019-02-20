@@ -16,7 +16,7 @@ def analyze_unwind(self, expr: MediumLevelILInstruction):
         RegisterValueType.ConstantPointerValue,
         RegisterValueType.ConstantValue,
     ):
-        return False
+        return
 
     visitor = UnwindVisitor()
     is_stack_var = visitor.visit(expr)
