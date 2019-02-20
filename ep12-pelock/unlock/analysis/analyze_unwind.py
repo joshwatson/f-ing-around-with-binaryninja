@@ -5,12 +5,14 @@ from binaryninja import (
     VariableSourceType
 )
 
+from ..state import SEHState
 from ..bnilvisitor import BNILVisitor
 from ..logging import log_debug
 
 
 def analyze_unwind(self, expr: MediumLevelILInstruction):
     log_debug("analyze_unwind")
+    log_debug(f"{self.seh_state!r}")
 
     if expr.src.value.type not in (
         RegisterValueType.ConstantPointerValue,
@@ -25,6 +27,7 @@ def analyze_unwind(self, expr: MediumLevelILInstruction):
         log_debug("Stack manipulation found; Starting unwind...")
         self.in_exception = False
         self.unwinding = True
+        self.seh_state = SEHState.Unwinding
         next_il = expr.function[expr.instr_index + 1]
 
         self.view.convert_to_nop(is_stack_var)
@@ -78,6 +81,7 @@ class UnwindVisitor(BNILVisitor):
 
     def visit_MLIL_CONST(self, expr):
         if expr.constant == 0xb8:
+            log_debug("Found the 0xb8")
             self.nop_address = expr.address
         return False
 

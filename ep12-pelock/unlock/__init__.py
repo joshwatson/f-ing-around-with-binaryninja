@@ -1,5 +1,5 @@
 # This script requires python 3
-__all__ = ["logging", "bnilvisitor", "UnlockVisitor"]
+__all__ = ["logging", "bnilvisitor", "UnlockVisitor", "SEHState"]
 import operator as op
 import time
 from functools import partial
@@ -36,6 +36,7 @@ from binaryninja import (
     SSAVariable,
     Variable,
     VariableSourceType,
+    enum
 )
 from binaryninja import _binaryninjacore as core
 from binaryninja import log_debug, log_info, log_warn, worker_enqueue
@@ -51,6 +52,7 @@ from .analysis.analyze_unconditional_jump import analyze_unconditional_jump
 from .analysis.analyze_unwind import analyze_unwind
 from .bnilvisitor import BNILVisitor
 from .logging import log_debug
+from .state import SEHState
 
 
 class TargetQueue(Queue):
@@ -71,7 +73,6 @@ PluginCommand.register_for_function(
     is_valid=lambda v, f: "obfuscated" in v.file.filename,
 )
 
-
 class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
     def __init__(self, function: Function, start: int):
         BNILVisitor.__init__(self)
@@ -81,6 +82,7 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
         self.view: BinaryView = function.view
         self.address_size = self.view.arch.address_size
         self.target_queue = TargetQueue()
+        self.seh_state = SEHState.NoException
         self.push_seh = None
         self.in_exception = False
         self.unwinding = False
@@ -317,8 +319,8 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             return self.queue_prev_block(expr)
 
         # The rest is only for phase 2+
-        if self.phase == 1:
-            return
+        # if self.phase == 1:
+        #     return
 
         sub_value = expr.value
         if sub_value.type in (
@@ -326,20 +328,51 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             RegisterValueType.ConstantValue,
         ):
             log_debug(f"sub value is {sub_value.value:x}")
-            self.analyze_constant_folding(expr.left)
-            return False
+            return self.analyze_constant_folding(expr.left)
         else:
             log_debug("sub value is not a constant ptr")
 
         return
 
-    visit_MLIL_ADD = visit_MLIL_SUB
+    # def visit_MLIL_ADD(self, expr):
+    #     log_debug("visit_MLIL_SUB")
+
+    #     # This is a top level MLIL_SUB, which means it's probably a cmp instruction
+    #     if expr.function[expr.instr_index].operation == MediumLevelILOperation.MLIL_SUB:
+    #         return
+
+    #     if expr.left.value.type in (
+    #         RegisterValueType.UndeterminedValue,
+    #         RegisterValueType.EntryValue,
+    #     ):
+    #         self.view.convert_to_nop(expr.address)
+    #         # self.target_queue.put(expr.address)
+
+    #         return self.queue_prev_block(expr)
+
+    #     # The rest is only for phase 2+
+    #     # if self.phase == 1:
+    #     #     return
+
+    #     sub_value = expr.value
+    #     if sub_value.type in (
+    #         RegisterValueType.ConstantPointerValue,
+    #         RegisterValueType.ConstantValue,
+    #     ):
+    #         log_debug(f"sub value is {sub_value.value:x}")
+    #         return self.analyze_constant_folding(expr.left)
+    #     else:
+    #         log_debug("sub value is not a constant ptr")
+
+    #     return
+        
+
 
     def visit_MLIL_CONST(self, expr):
         log_debug("visit_MLIL_CONST")
 
-        if self.phase == 1:
-            return
+        # if self.phase == 1:
+        #     return
 
         if expr.llil.operation != LowLevelILOperation.LLIL_CONST:
             return self.visit(expr.llil)

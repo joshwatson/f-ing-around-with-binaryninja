@@ -25,7 +25,8 @@ def analyze_constant_folding(self, expr):
         )
 
     if None in (dependents, patch_value, patch_address):
-        return False
+        log_debug("got None back, returning")
+        return
 
     if self.view.get_instruction_length(patch_address.address) < len(patch_value):
         log_debug(f"{patch_address.address:x} is too few bytes to patch")
@@ -45,7 +46,7 @@ def analyze_constant_folding(self, expr):
     # place the last address on the queue, to fold
     # all the NOPs and GOTOs
     if dependents:
-        self.target_queue.put(dependents[-1])
+        self.queue_prev_block(self.function.get_low_level_il_at(dependents[-1]).mmlil)
         return True
     else:
         return
@@ -120,6 +121,10 @@ def analyze_constant_folding_mlil(self, expr):
     log_debug("analyze_constant_folding_mlil")
     mlil = expr.function
 
+    if expr.src.storage > 0x7fffffff:
+        log_debug("this is a temp var")
+        return
+
     var_value = mlil[expr.instr_index].src.value
 
     log_debug(f"folding {expr.src} into {var_value.value:x}")
@@ -160,12 +165,15 @@ def analyze_constant_folding_mlil(self, expr):
             )
         elif patch_var.dest.name:
             patch_string = f"mov {patch_var.dest.name}, 0x{var_value.value:x}"
+            log_debug(patch_string)
             patch_value = self.view.arch.assemble(
                 patch_string, patch_var.address
             )
         else:
+            log_debug("returning None")
             return [], None, None
     else:
+        log_debug("returning None")
         return [], None, None
 
     return (
