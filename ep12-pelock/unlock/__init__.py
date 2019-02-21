@@ -46,7 +46,7 @@ from .analysis.analyze_exception_handler import (
     analyze_exception_handler_store,
 )
 from .analysis.analyze_folding import analyze_constant_folding, analyze_goto_folding
-from .analysis.analyze_indirect_jump import analyze_indirect_jump, analyze_possible_call
+from .analysis.analyze_indirect_jump import analyze_indirect_jump, analyze_possible_call, NewFunctionNotification
 from .analysis.analyze_return import analyze_return
 from .analysis.analyze_unconditional_jump import analyze_unconditional_jump
 from .analysis.analyze_unwind import analyze_unwind
@@ -83,11 +83,8 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
         self.address_size = self.view.arch.address_size
         self.target_queue = TargetQueue()
         self.seh_state = SEHState.NoException
-        self.push_seh = None
-        self.in_exception = False
-        self.unwinding = False
-        self.look_for_pop = False
         self.seh = []
+        self.enter_location = None
         self.seen = {}
         self.analysis_complete = Event()
         self.prev_phase = 1
@@ -95,6 +92,8 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
         self.phase = 1
 
         self.target_queue.put(start)
+
+        self.view.register_notification(NewFunctionNotification())
 
     def run(self):
         self.run_time = time.time()
@@ -147,7 +146,7 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
                 self.progress = f"[Phase {self.phase}] {self.addr:x} in function {self.function.start:x} ({il.instr_index}/{len(list(mmlil.instructions))})"
 
                 while True:
-                    log_debug(f"analyzing {il.instr_index}: {il}")
+                    log_debug(f"analyzing {il.instr_index}[{il.address:08x}]: {il}")
 
                     # self.function.analysis_skipped = True
                     self.view.begin_undo_actions()
@@ -237,7 +236,7 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             llil_instr = expr.llil
             if llil_instr.operation == LowLevelILOperation.LLIL_SET_REG_SSA:
                 if not expr.function.llil.get_ssa_reg_uses(llil_instr.dest):
-                    self.view.convert_to_nop(expr.address)
+                    self.convert_to_nop(expr.address)
                     return self.queue_prev_block(expr)
 
         return self.visit(expr.src)
@@ -313,10 +312,13 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             RegisterValueType.UndeterminedValue,
             RegisterValueType.EntryValue,
         ):
-            self.view.convert_to_nop(expr.address)
-            # self.target_queue.put(expr.address)
-
-            return self.queue_prev_block(expr)
+            # Make sure we're not accidentally NOPing a push/pop
+            # due to the stack being in a bad state due to a weird
+            # loop
+            if (expr.left.operation != MediumLevelILOperation.MLIL_VAR and 
+                    expr.left.src.index != self.view.arch.get_reg_index('esp')):
+                self.convert_to_nop(expr.address)
+                return self.queue_prev_block(expr)
 
         # The rest is only for phase 2+
         # if self.phase == 1:
@@ -334,39 +336,28 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
 
         return
 
-    # def visit_MLIL_ADD(self, expr):
-    #     log_debug("visit_MLIL_SUB")
+    def visit_MLIL_ADD(self, expr):
+        log_debug("visit_MLIL_ADD")
 
-    #     # This is a top level MLIL_SUB, which means it's probably a cmp instruction
-    #     if expr.function[expr.instr_index].operation == MediumLevelILOperation.MLIL_SUB:
-    #         return
+        if expr.left.value.type in (
+            RegisterValueType.UndeterminedValue,
+            RegisterValueType.EntryValue,
+        ):
+            self.convert_to_nop(expr.address)
 
-    #     if expr.left.value.type in (
-    #         RegisterValueType.UndeterminedValue,
-    #         RegisterValueType.EntryValue,
-    #     ):
-    #         self.view.convert_to_nop(expr.address)
-    #         # self.target_queue.put(expr.address)
+            return self.queue_prev_block(expr)
 
-    #         return self.queue_prev_block(expr)
+        add_value = expr.value
+        if add_value.type in (
+            RegisterValueType.ConstantPointerValue,
+            RegisterValueType.ConstantValue,
+        ):
+            log_debug(f"add value is {add_value.value:x}")
+            return self.analyze_constant_folding(expr.left)
+        else:
+            log_debug("add value is not a constant ptr")
 
-    #     # The rest is only for phase 2+
-    #     # if self.phase == 1:
-    #     #     return
-
-    #     sub_value = expr.value
-    #     if sub_value.type in (
-    #         RegisterValueType.ConstantPointerValue,
-    #         RegisterValueType.ConstantValue,
-    #     ):
-    #         log_debug(f"sub value is {sub_value.value:x}")
-    #         return self.analyze_constant_folding(expr.left)
-    #     else:
-    #         log_debug("sub value is not a constant ptr")
-
-    #     return
-        
-
+        return
 
     def visit_MLIL_CONST(self, expr):
         log_debug("visit_MLIL_CONST")
@@ -386,7 +377,7 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             RegisterValueType.UndeterminedValue,
             RegisterValueType.EntryValue,
         ):
-            self.view.convert_to_nop(expr.address)
+            self.convert_to_nop(expr.address)
 
             return self.queue_prev_block(expr)
 
@@ -408,7 +399,12 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
     analyze_possible_call = analyze_possible_call
     analyze_exception_handler_set_var = analyze_exception_handler_set_var
 
+    def convert_to_nop(self, address):
+        log_debug(f"Nopping {address:x}")
+        self.view.convert_to_nop(address)
+
     def queue_prev_block(self, expr):
+        log_debug("queue_prev_block")
         if isinstance(expr, MediumLevelILInstruction):
             ILBasicBlock = MediumLevelILBasicBlock
 
@@ -421,6 +417,8 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             if bb.start <= expr.instr_index < bb.end
         )
 
+        log_debug(f"current_bb has {len(current_bb.incoming_edges)} incoming edges")
+
         if len(current_bb.incoming_edges) != 1:
             log_debug("Incoming Edges was not 1, just continuing")
             self.target_queue.put(expr.address)
@@ -428,41 +426,16 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
 
         prev_bb = current_bb.incoming_edges[0].source
 
-        while prev_bb[0].operation in (MediumLevelILOperation.MLIL_GOTO, LowLevelILOperation.LLIL_GOTO):
+        while prev_bb[0].operation in (LowLevelILOperation.LLIL_JUMP_TO, MediumLevelILOperation.MLIL_JUMP_TO, MediumLevelILOperation.MLIL_GOTO, LowLevelILOperation.LLIL_GOTO):
             if len(prev_bb.incoming_edges) != 1:
                 log_debug("Incoming edges was not 1, stopping here")
                 break
             
-            prev_bb = prev_bb.incoming_edges[0].source
+            log_debug(f"{prev_bb.incoming_edges}")
+            if prev_bb not in prev_bb.incoming_edges[0].source.dominators:
+                prev_bb = prev_bb.incoming_edges[0].source
+            else:
+                break
 
         self.target_queue.put(prev_bb.il_function[prev_bb.start].address)
         return True
-
-        # # get the previous basic block
-        # current_bb = next(
-        #     bb
-        #     for bb in self.view.get_basic_blocks_at(expr.address)
-        #     if bb.function == self.function
-        # )
-        # if current_bb.start != expr.address or len(current_bb.incoming_edges) > 1:
-        #     # TODO: deal with multiple incoming edges... probably just add them to queue?
-        #     self.target_queue.put(expr.function[expr.instr_index + 1].address)
-        # else:
-        #     previous_bb = current_bb.incoming_edges[0].source
-        #     prev_il = self.function.get_low_level_il_at(previous_bb.start).mmlil
-
-        #     if prev_il is None:
-        #         log_debug("prev_il was None for some reason")
-        #         return False
-
-        #     while prev_il.operation not in (MediumLevelILOperation.MLIL_GOTO, LowLevelILOperation.LLIL_GOTO):
-        #         try:
-        #             log_debug(f"prev_il: {prev_il.instr_index} {prev_il.address:x} {prev_il.operation!r}")
-        #             prev_il = expr.function[prev_il.instr_index + 1]
-        #         except Exception as e:
-        #             # something went wrong here. Bail on this path
-        #             log_debug(f"Something went wrong iterating over prev_il: {e}")
-        #             return False
-
-        #     self.target_queue.put(prev_il.address)
-        # return True

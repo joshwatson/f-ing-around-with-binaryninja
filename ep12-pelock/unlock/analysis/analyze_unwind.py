@@ -25,12 +25,9 @@ def analyze_unwind(self, expr: MediumLevelILInstruction):
 
     if is_stack_var is not False:
         log_debug("Stack manipulation found; Starting unwind...")
-        self.in_exception = False
-        self.unwinding = True
         self.seh_state = SEHState.Unwinding
         next_il = expr.function[expr.instr_index + 1]
-
-        self.view.convert_to_nop(is_stack_var)
+        self.convert_to_nop(is_stack_var)
 
         patch_value = self.view.arch.assemble(
             f"jmp 0x{expr.src.value.value:x}", next_il.address
@@ -42,11 +39,10 @@ def analyze_unwind(self, expr: MediumLevelILInstruction):
             )
 
             self.target_queue.put(next_il.address)
-
-            self.view.convert_to_nop(expr.address)
+            self.convert_to_nop(expr.address)
 
             if hasattr(visitor, 'nop_address'):
-                self.view.convert_to_nop(visitor.nop_address)
+                self.convert_to_nop(visitor.nop_address)
 
             return True
         else:

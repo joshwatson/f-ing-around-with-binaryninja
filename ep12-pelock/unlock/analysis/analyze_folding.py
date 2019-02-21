@@ -11,6 +11,7 @@ from binaryninja import (
     ILRegister
 )
 
+from ..logging import log_debug
 
 def analyze_constant_folding(self, expr):
     log_debug("analyze_constant_folding")
@@ -33,14 +34,16 @@ def analyze_constant_folding(self, expr):
         return False
 
     # First, convert to NOPs and *then* write the patch
-    self.view.convert_to_nop(patch_address.address)
+    self.convert_to_nop(patch_address.address)
+
+    log_debug(f"Writing patch at {patch_address.address:x}")
     self.view.write(patch_address.address, patch_value)
 
     log_debug("NOPPING THE SHIT OUT OF THIS THING")
     # Nop all of the previous assignments
     for addr in dependents:
         log_debug(f'nopping {addr:x}')
-        self.view.convert_to_nop(addr)
+        self.convert_to_nop(addr)
     log_debug("DONE WITH ALL THAT NOPPING")
 
     # place the last address on the queue, to fold

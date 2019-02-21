@@ -1,5 +1,7 @@
 from binaryninja import (
     MediumLevelILInstruction,
+    BinaryView,
+    Function,
     Type,
     MediumLevelILOperation,
     LowLevelILOperation,
@@ -7,11 +9,13 @@ from binaryninja import (
     Variable,
     VariableSourceType,
     SSAVariable,
-    MediumLevelILBasicBlock
+    MediumLevelILBasicBlock,
+    BinaryDataNotification
 )
 
 from ..bnilvisitor import BNILVisitor
 from ..logging import log_debug
+from ..state import SEHState
 
 
 class JumpVisitor(BNILVisitor):
@@ -50,7 +54,9 @@ def analyze_indirect_jump(self, expr: MediumLevelILInstruction):
 def analyze_possible_call(self, expr: MediumLevelILInstruction):
     log_debug("analyze_possible_call")
 
-    if self.phase == 1:
+    # When we're in an exception, there's extra executable addresses on the stack.
+    # So, if we're in an exception-based obfuscation, there won't be any calls.
+    if self.seh_state != SEHState.NoException:
         return
 
     if expr.dest.operation != MediumLevelILOperation.MLIL_CONST_PTR:
@@ -91,10 +97,6 @@ def analyze_possible_call(self, expr: MediumLevelILInstruction):
         self.function, VariableSourceType.StackVariableSourceType, 0, current_esp.offset
     )
 
-    return_addr_version = expr.get_ssa_var_version(return_addr_var)
-
-    return_addr_ssa = SSAVariable(return_addr_var, return_addr_version)
-
     # get the IL instructions of the definitions instead of the indices
     return_addr_definitions = list(
         map(
@@ -118,10 +120,10 @@ def analyze_possible_call(self, expr: MediumLevelILInstruction):
         )
 
         if instr_bb in current_bb.dominators:
-            self.view.convert_to_nop(instr.address)
+            self.convert_to_nop(instr.address)
 
-    
-    self.target_queue.put(return_addr_definitions[0].address)
+    # analyze both the return address and the new function
+    self.queue_prev_block(return_addr_definitions[0])
     self.target_queue.put(expr.dest.constant)
 
     # Change the phase back to 1
@@ -130,3 +132,8 @@ def analyze_possible_call(self, expr: MediumLevelILInstruction):
 
     return True
 
+class NewFunctionNotification(BinaryDataNotification):
+    def function_added(self, view: BinaryView, func: Function):
+
+        # TODO: Figure out a better way to analyze this. Using the caller?
+        func.function_type = Type.function(Type.void(), [])
