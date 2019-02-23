@@ -8,10 +8,12 @@ from binaryninja import (
     MediumLevelILInstruction,
     LowLevelILInstruction,
     MediumLevelILOperation,
-    ILRegister
+    ILRegister,
+    RegisterValueType,
 )
 
 from ..logging import log_debug
+
 
 def analyze_constant_folding(self, expr):
     log_debug("analyze_constant_folding")
@@ -42,7 +44,7 @@ def analyze_constant_folding(self, expr):
     log_debug("NOPPING THE SHIT OUT OF THIS THING")
     # Nop all of the previous assignments
     for addr in dependents:
-        log_debug(f'nopping {addr:x}')
+        log_debug(f"nopping {addr:x}")
         self.convert_to_nop(addr)
     log_debug("DONE WITH ALL THAT NOPPING")
 
@@ -55,7 +57,7 @@ def analyze_constant_folding(self, expr):
         return
 
 
-def analyze_constant_folding_llil(self, expr):
+def analyze_constant_folding_llil(self, expr: LowLevelILInstruction):
     log_debug("analyze_constant_folding_llil")
 
     llil = expr.function.non_ssa_form
@@ -87,20 +89,25 @@ def analyze_constant_folding_llil(self, expr):
     while next_il:
         log_debug(f"{next_il}: {next_il.src.prefix_operands}")
         reg = next(
-            (o for o in next_il.ssa_form.src.prefix_operands
-            if isinstance(o, ILRegister)
-            and o.index == partial_reg_index),
-            None
+            (
+                o
+                for o in next_il.ssa_form.src.prefix_operands
+                if isinstance(o, ILRegister) and o.index == partial_reg_index
+            ),
+            None,
         )
         ssa = next(
-            (o for o in next_il.ssa_form.src.prefix_operands
-            if isinstance(o, SSARegister)
-            and o.reg.index == reg_index
-            and len(llil.get_ssa_reg_uses(o)) == 1),
-            None
+            (
+                o
+                for o in next_il.ssa_form.src.prefix_operands
+                if isinstance(o, SSARegister)
+                and o.reg.index == reg_index
+                and len(llil.get_ssa_reg_uses(o)) == 1
+            ),
+            None,
         )
-        
-        if ssa is not None and reg is None:    
+
+        if ssa is not None and reg is None:
             next_il = llil[llil.get_ssa_reg_definition(ssa)]
             dependent_regs.append(next_il.address)
         elif ssa is not None and reg is not None:
@@ -120,11 +127,11 @@ def analyze_constant_folding_llil(self, expr):
     return dependent_regs, patch_value, reg_def
 
 
-def analyze_constant_folding_mlil(self, expr):
+def analyze_constant_folding_mlil(self, expr: MediumLevelILInstruction):
     log_debug("analyze_constant_folding_mlil")
     mlil = expr.function
 
-    if expr.src.storage > 0x7fffffff:
+    if expr.src.storage > 0x7FFFFFFF:
         log_debug("this is a temp var")
         return
 
@@ -154,7 +161,7 @@ def analyze_constant_folding_mlil(self, expr):
             next_il = None
 
     if dependents:
-        log_debug(f'{dependents!r}')
+        log_debug(f"{dependents!r}")
         patch_var = dependents.pop()
         log_debug(f"{patch_var}")
 
@@ -162,16 +169,11 @@ def analyze_constant_folding_mlil(self, expr):
             # Convert the final one into the assignment
             patch_string = f'{"push" if patch_var.llil.dest.operation == LowLevelILOperation.LLIL_SUB else "pop"} 0x{var_value.value:x}'
             log_debug(f"{patch_string} at {patch_var.address:x}")
-            patch_value = self.view.arch.assemble(
-                patch_string,
-                patch_var.address,
-            )
+            patch_value = self.view.arch.assemble(patch_string, patch_var.address)
         elif patch_var.dest.name:
             patch_string = f"mov {patch_var.dest.name}, 0x{var_value.value:x}"
             log_debug(patch_string)
-            patch_value = self.view.arch.assemble(
-                patch_string, patch_var.address
-            )
+            patch_value = self.view.arch.assemble(patch_string, patch_var.address)
         else:
             log_debug("returning None")
             return [], None, None
@@ -179,14 +181,10 @@ def analyze_constant_folding_mlil(self, expr):
         log_debug("returning None")
         return [], None, None
 
-    return (
-        [i.address for i in dependents] + [expr.address],
-        patch_value,
-        patch_var,
-    )
+    return ([i.address for i in dependents] + [expr.address], patch_value, patch_var)
 
 
-def analyze_goto_folding(self, expr):
+def analyze_goto_folding(self, expr: MediumLevelILInstruction):
     log_debug("analyze_goto_folding")
     llil = expr.function.llil
 
@@ -201,8 +199,9 @@ def analyze_goto_folding(self, expr):
     log_debug(f"final_target = {final_target}")
 
     while final_target.operation == LowLevelILOperation.LLIL_GOTO:
+        # TODO: Add phase 2 JUMP_TO option here
         final_target = llil[final_target.dest]
-        log_debug(f"final_target = {final_target}")
+        log_debug(f"final_target = {final_target.address:x}")
 
     if llil_jump.dest == final_target.instr_index:
         return final_target.mmlil.instr_index
@@ -212,7 +211,7 @@ def analyze_goto_folding(self, expr):
     )
 
     if self.view.get_instruction_length(expr.address) < len(patch_value):
-        log_debug(f'{expr.address:x} is too small for patch')
+        log_debug(f"{expr.address:x} is too small for patch")
         return
 
     self.view.write(expr.address, patch_value)

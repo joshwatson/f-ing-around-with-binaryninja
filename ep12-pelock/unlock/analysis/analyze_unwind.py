@@ -2,8 +2,9 @@ from binaryninja import (
     MediumLevelILOperation,
     RegisterValueType,
     MediumLevelILInstruction,
-    VariableSourceType
+    VariableSourceType,
 )
+
 
 from ..state import SEHState
 from ..bnilvisitor import BNILVisitor
@@ -33,20 +34,17 @@ def analyze_unwind(self, expr: MediumLevelILInstruction):
             f"jmp 0x{expr.src.value.value:x}", next_il.address
         )
         if self.view.get_instruction_length(next_il.address) >= len(patch_value):
-            self.view.write(
-                next_il.address,
-                patch_value,
-            )
+            self.view.write(next_il.address, patch_value)
 
             self.target_queue.put(next_il.address)
             self.convert_to_nop(expr.address)
 
-            if hasattr(visitor, 'nop_address'):
+            if hasattr(visitor, "nop_address"):
                 self.convert_to_nop(visitor.nop_address)
 
             return True
         else:
-            log_debug(f'{next_il.address:x} is not big enough for a patch')
+            log_debug(f"{next_il.address:x} is not big enough for a patch")
             return False
 
     log_debug("This store does not manipulate the unwind.")
@@ -76,7 +74,7 @@ class UnwindVisitor(BNILVisitor):
     visit_MLIL_SUB = visit_MLIL_ADD
 
     def visit_MLIL_CONST(self, expr):
-        if expr.constant == 0xb8:
+        if expr.constant == 0xB8:
             log_debug("Found the 0xb8")
             self.nop_address = expr.address
         return False

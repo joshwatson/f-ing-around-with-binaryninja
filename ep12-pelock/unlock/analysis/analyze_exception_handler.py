@@ -26,7 +26,9 @@ class NullDerefVisitor(BNILVisitor):
     visit_MLIL_CONST = visit_MLIL_CONST_PTR
 
 
-def analyze_exception_handler_set_var(self, expr: MediumLevelILInstruction):
+def analyze_exception_handler_set_var(
+    self, expr: MediumLevelILInstruction
+):
     log_debug("analyze_exception_handler_set_var")
     log_debug(f"{self.seh_state!r}")
 
@@ -43,7 +45,9 @@ def analyze_exception_handler_set_var(self, expr: MediumLevelILInstruction):
                 self.enter_location = expr.address
                 self.view.write(
                     expr.address,
-                    self.view.arch.assemble(f"enter 0xb4, 0\njmp 0x{target:x}", expr.address),
+                    self.view.arch.assemble(
+                        f"enter 0xb4, 0\njmp 0x{target:x}", expr.address
+                    ),
                 )
                 self.target_queue.put(target)
                 return True
@@ -67,7 +71,9 @@ def analyze_exception_handler_set_var(self, expr: MediumLevelILInstruction):
         return self.visit(expr.src)
 
 
-def analyze_exception_handler_store(self, expr: MediumLevelILInstruction):
+def analyze_exception_handler_store(
+    self, expr: MediumLevelILInstruction
+):
     log_debug("analyze_exception_handler_store")
     log_debug(f"{self.seh_state!r}")
 

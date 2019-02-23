@@ -4,6 +4,7 @@ from binaryninja import (
     RegisterValueType,
     Variable,
     ILBranchDependence,
+    MediumLevelILInstruction,
 )
 from itertools import chain
 from ..bnilvisitor import BNILVisitor
@@ -27,7 +28,7 @@ cmp_pairs = {
 }
 
 
-def analyze_unconditional_jump(self, expr):
+def analyze_unconditional_jump(self, expr: MediumLevelILInstruction):
     log_debug("analyze_unconditional_jump")
 
     function = self.function

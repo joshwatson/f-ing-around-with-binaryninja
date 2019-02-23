@@ -54,10 +54,15 @@ def analyze_indirect_jump(self, expr: MediumLevelILInstruction):
 def analyze_possible_call(self, expr: MediumLevelILInstruction):
     log_debug("analyze_possible_call")
 
+    if self.phase == 1:
+        return
+
     # When we're in an exception, there's extra executable addresses on the stack.
     # So, if we're in an exception-based obfuscation, there won't be any calls.
-    if self.seh_state != SEHState.NoException:
+    if self.exception_visitors[self.function.start].state != SEHState.NoException:
         return
+
+    log_debug(f'{self.function.start:x} {self.exception_visitors[self.function.start].state!r}')
 
     if expr.dest.operation != MediumLevelILOperation.MLIL_CONST_PTR:
         return
@@ -82,6 +87,8 @@ def analyze_possible_call(self, expr: MediumLevelILInstruction):
 
     if not self.view.is_offset_executable(ret_addr.value):
         return
+
+    log_debug(f"{ret_addr.value:x} is executable")
 
     # If we got to here, then this is a tail call. Let's define the call
     patch_value = self.view.arch.assemble(f"call {target_reg}", expr.address)
@@ -122,8 +129,13 @@ def analyze_possible_call(self, expr: MediumLevelILInstruction):
         if instr_bb in current_bb.dominators:
             self.convert_to_nop(instr.address)
 
-    # analyze both the return address and the new function
+    # queue the return address for analysis
     self.queue_prev_block(return_addr_definitions[0])
+
+    # queue the function start as well
+    from ..exceptionvisitor import ExceptionVisitor
+
+    self.exception_visitors[expr.dest.constant] = ExceptionVisitor(self)
     self.target_queue.put(expr.dest.constant)
 
     # Change the phase back to 1
@@ -131,9 +143,3 @@ def analyze_possible_call(self, expr: MediumLevelILInstruction):
     self.phase = 1
 
     return True
-
-class NewFunctionNotification(BinaryDataNotification):
-    def function_added(self, view: BinaryView, func: Function):
-
-        # TODO: Figure out a better way to analyze this. Using the caller?
-        func.function_type = Type.function(Type.void(), [])
