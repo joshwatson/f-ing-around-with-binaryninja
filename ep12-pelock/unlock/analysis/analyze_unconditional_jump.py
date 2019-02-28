@@ -37,7 +37,7 @@ def analyze_unconditional_jump(self, expr: MediumLevelILInstruction):
 
     seen_count = self.seen.get(expr.address, 0)
     log_debug(f"Analyzing {expr.address:x} : {seen_count} times")
-    if seen_count > 10:
+    if seen_count > 20:
         log_debug(f"{expr.address:x} has been seen too many times")
         return expr.true
 

@@ -4,6 +4,7 @@ import time
 from functools import partial
 from queue import Queue
 from threading import Event
+from math import floor
 
 from binaryninja import (
     AnalysisCompletionEvent,
@@ -45,10 +46,7 @@ from .analysis.analyze_exception_handler import (
     analyze_exception_handler_store,
 )
 from .analysis.analyze_folding import analyze_constant_folding, analyze_goto_folding
-from .analysis.analyze_indirect_jump import (
-    analyze_indirect_jump,
-    analyze_possible_call,
-)
+from .analysis.analyze_indirect_jump import analyze_indirect_jump, analyze_possible_call
 from .analysis.analyze_return import analyze_return
 from .analysis.analyze_unconditional_jump import analyze_unconditional_jump
 from .bnilvisitor import BNILVisitor
@@ -72,10 +70,12 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
         self.view: BinaryView = function.view
         self.address_size = self.view.arch.address_size
         self.target_queue = TargetQueue()
-        self.exception_visitors = {f.start: ExceptionVisitor(self) for f in self.view.functions}
+        self.exception_visitors = {
+            f.start: ExceptionVisitor(self) for f in self.view.functions
+        }
         self.seen = {}
         self.prev_phase = 1
-        self.num_phases = 2
+        self.num_phases = 3
         self.phase = 1
 
         self.target_queue.put(start)
@@ -131,7 +131,9 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
                 self.progress = f"[Phase {self.phase}] {self.addr:x} in function {self.function.start:x} ({il.instr_index}/{len(list(mmlil.instructions))})"
 
                 while True:
-                    log_debug(f"[{self.function.start:08x} analyzing {il.instr_index}[{il.address:08x}]: {il}")
+                    log_debug(
+                        f"[{self.function.start:08x} analyzing {il.instr_index}[{il.address:08x}]: {il}"
+                    )
 
                     # self.function.analysis_skipped = True
                     self.view.begin_undo_actions()
@@ -219,12 +221,34 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             return self.exception_visitors[self.function.start].visit(expr)
 
         elif self.phase > 1:
+            if expr.src.operation == MediumLevelILOperation.MLIL_VAR and expr.dest == expr.src.src:
+                self.convert_to_nop(expr.address)
+                return self.queue_prev_block(expr)
+
             llil_instr = expr.llil
             if llil_instr.operation == LowLevelILOperation.LLIL_SET_REG_SSA:
                 if not expr.function.llil.get_ssa_reg_uses(llil_instr.dest):
-                    if llil_instr.non_ssa_form.operation == LowLevelILOperation.LLIL_SET_REG and llil_instr.non_ssa_form.src.operation != LowLevelILOperation.LLIL_POP:
-                        self.convert_to_nop(expr.address)
-                        return self.queue_prev_block(expr)
+                    if (
+                        llil_instr.non_ssa_form.operation
+                        == LowLevelILOperation.LLIL_SET_REG
+                    ):
+                        if (
+                            llil_instr.non_ssa_form.src.operation
+                            != LowLevelILOperation.LLIL_POP
+                        ):
+                            self.convert_to_nop(expr.address)
+                            return self.queue_prev_block(expr)
+                        elif expr.src.operation == MediumLevelILOperation.MLIL_VAR:
+                            pop_var = expr.src.ssa_form.src
+                            push_var_def = expr.function.ssa_form[
+                                expr.function.get_ssa_var_definition(pop_var)
+                            ]
+                            if expr.function.get_ssa_var_uses(push_var_def.dest) == [
+                                expr.instr_index
+                            ]:
+                                self.convert_to_nop(expr.address)
+                                self.convert_to_nop(push_var_def.address)
+                                return self.queue_prev_block(expr)
 
         return self.visit(expr.src)
 
@@ -238,6 +262,20 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             return self.analyze_constant_folding(expr)
 
     def visit_MLIL_SET_VAR_FIELD(self, expr):
+        if self.phase > 1:
+            llil_instr = expr.llil
+            if llil_instr.operation == LowLevelILOperation.LLIL_SET_REG_SSA_PARTIAL:
+                if not expr.function.llil.get_ssa_reg_uses(llil_instr.full_reg):
+                    if (
+                        llil_instr.non_ssa_form.operation
+                        == LowLevelILOperation.LLIL_SET_REG
+                    ):
+                        if (
+                            llil_instr.non_ssa_form.src.operation
+                            != LowLevelILOperation.LLIL_POP
+                        ):
+                            self.convert_to_nop(expr.address)
+                            return self.queue_prev_block(expr)
         return self.visit(expr.src)
 
     def visit_MLIL_IF(self, expr):
@@ -293,7 +331,8 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
 
         # This is a top level MLIL_SUB, which means it's probably a cmp instruction
         if expr.function[expr.instr_index].operation == MediumLevelILOperation.MLIL_SUB:
-            return
+            self.convert_to_nop(expr.address)
+            return self.queue_prev_block(expr)
 
         if expr.left.value.type in (
             RegisterValueType.UndeterminedValue,
@@ -308,10 +347,6 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
             ):
                 self.convert_to_nop(expr.address)
                 return self.queue_prev_block(expr)
-
-        # The rest is only for phase 2+
-        # if self.phase == 1:
-        #     return
 
         sub_value = expr.value
         if sub_value.type in (
@@ -351,9 +386,6 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
     def visit_MLIL_CONST(self, expr):
         log_debug("visit_MLIL_CONST")
 
-        # if self.phase == 1:
-        #     return
-
         if expr.llil.operation != LowLevelILOperation.LLIL_CONST:
             return self.visit(expr.llil)
 
@@ -372,10 +404,21 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
 
     visit_MLIL_AND = visit_MLIL_XOR
 
+    def visit_MLIL_OR(self, expr):
+        log_debug("visit_MLIL_OR")
+
+        # If it's something like `ecx | 0` then we can NOP it
+        # and nothing of value is lost
+        if expr.right.value.type in (
+            RegisterValueType.ConstantPointerValue,
+            RegisterValueType.ConstantValue
+        ) and expr.right.value.value == 0:
+            self.convert_to_nop(expr.address)
+
+            return self.queue_prev_block(expr)
+
     def visit_MLIL_TAILCALL(self, expr):
         log_debug("visit_MLIL_TAIL_CALL")
-        # TODO: implement something to recover control flow
-        # for tail calls
         return self.visit(expr.dest.llil)
 
     visit_MLIL_TAILCALL_UNTYPED = visit_MLIL_TAILCALL

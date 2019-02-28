@@ -198,9 +198,21 @@ def analyze_goto_folding(self, expr: MediumLevelILInstruction):
     final_target = llil[llil_jump.dest]
     log_debug(f"final_target = {final_target}")
 
-    while final_target.operation == LowLevelILOperation.LLIL_GOTO:
-        # TODO: Add phase 2 JUMP_TO option here
-        final_target = llil[final_target.dest]
+    if self.phase < 3:
+        jump_ops = (LowLevelILOperation.LLIL_GOTO,)
+    else:
+        jump_ops = (LowLevelILOperation.LLIL_GOTO, LowLevelILOperation.LLIL_JUMP_TO)
+
+    while final_target.operation in jump_ops:
+        if (
+            final_target.operation == LowLevelILOperation.LLIL_JUMP_TO
+            and final_target.dest.value.type == RegisterValueType.ConstantPointerValue
+        ):
+            final_target = self.function.get_low_level_il_at(
+                final_target.dest.value.value
+            )
+        else:
+            final_target = llil[final_target.dest]
         log_debug(f"final_target = {final_target.address:x}")
 
     if llil_jump.dest == final_target.instr_index:
