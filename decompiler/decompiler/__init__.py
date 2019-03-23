@@ -1,4 +1,4 @@
-__all__ = ['mlil_linear', 'ast']
+__all__ = ['mlil_linear', 'mlil_ast']
 
 try:
     from binaryninjaui import ViewType

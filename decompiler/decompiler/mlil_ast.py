@@ -16,17 +16,14 @@ from binaryninja import (
     InstructionTextTokenType,
 )
 
+from .region import Region
+from .nodes import (
+    MediumLevelILAstNode,
+    MediumLevelILAstSeqNode,
+    MediumLevelILAstCondNode,
+    MediumLevelILAstBasicBlockNode,
+)
 from .condition_visitor import ConditionVisitor
-
-
-def get_dominated(basic_blocks):
-    dominated = {bb: set() for bb in basic_blocks}
-
-    for bb in basic_blocks:
-        for d in bb.dominators:
-            dominated[d].add(bb)
-
-    return dominated
 
 
 class MediumLevelILAst(object):
@@ -38,27 +35,6 @@ class MediumLevelILAst(object):
         self._dominated = None
         self._regions = {}
         self._reaching_conditions = None
-
-    def generate(self):
-        # step 1: identify cycles
-        self._cycles = {
-            e.target
-            for bb in self.function.basic_blocks
-            for e in bb.outgoing_edges
-            if e.back_edge
-        }
-
-        # step 2: generate the list of what each bb dominates
-        self._dominated = self._generate_dominated()
-
-        # step 3: find all the regions
-        self._regions = self._find_regions()
-
-        # step 4: iterate through the regions and structure them
-        self._structure_regions()
-
-        # step 5: order the regions
-        self.order_regions()
 
     def __getitem__(self, bb) -> MediumLevelILAstNode:
         return self._nodes[bb]
@@ -170,6 +146,27 @@ class MediumLevelILAst(object):
 
         return reaching_conditions
 
+    def generate(self):
+        # step 1: identify cycles
+        self._cycles = {
+            e.target
+            for bb in self.function.basic_blocks
+            for e in bb.outgoing_edges
+            if e.back_edge
+        }
+
+        # step 2: generate the list of what each bb dominates
+        self._dominated = self._generate_dominated()
+
+        # step 3: find all the regions
+        self._regions = self._find_regions()
+
+        # step 4: iterate through the regions and structure them
+        self._structure_regions()
+
+        # step 5: order the regions
+        self.order_regions()
+
     def _generate_dominated(self):
         basic_blocks = self.function.basic_blocks
         dominated = {bb: set() for bb in basic_blocks}
@@ -215,9 +212,7 @@ class MediumLevelILAst(object):
                         nodes.append(r)
 
                 new_region = Region(
-                    self,
-                    MediumLevelILAstBasicBlockNode(self, bb),
-                    nodes=nodes
+                    self, MediumLevelILAstBasicBlockNode(self, bb), nodes=nodes
                 )
 
             else:
@@ -237,7 +232,7 @@ class MediumLevelILAst(object):
                     nodes=[
                         MediumLevelILAstBasicBlockNode(self, pr)
                         for pr in possible_region
-                    ]
+                    ],
                 )
 
             regions[bb] = new_region
@@ -253,11 +248,12 @@ class MediumLevelILAst(object):
 
     def convert_region_to_seq(self, sub_region):
         new_seq = MediumLevelILAstSeqNode(self, sub_region.header.block)
-        
+
         for n in sub_region.nodes:
             new_seq.append(
                 MediumLevelILAstBasicBlockNode(self, n)
-                if isinstance(n, MediumLevelILBasicBlock) else n
+                if isinstance(n, MediumLevelILBasicBlock)
+                else n
             )
 
         return new_seq
@@ -324,7 +320,12 @@ class MediumLevelILAst(object):
     def generate_reaching_condition_MLIL(self, region_header, bb):
         or_exprs = []
 
-        for condition in self.reaching_conditions[(region_header, bb if isinstance(bb, MediumLevelILBasicBlock) else bb.header.block)]:
+        for condition in self.reaching_conditions[
+            (
+                region_header,
+                bb if isinstance(bb, MediumLevelILBasicBlock) else bb.header.block,
+            )
+        ]:
             and_exprs = []
             for edge in condition:
                 if edge.type == BranchType.UnconditionalBranch:
@@ -407,166 +408,3 @@ class MediumLevelILAst(object):
             prev_indent = indent
 
         return output
-
-
-class MediumLevelILAstNode(object):
-    def __init__(self, ast: MediumLevelILAst):
-        self._children = deque()
-        self._ast = ast
-
-    def prepend(self, child: MediumLevelILAstNode):
-        self._children.appendleft(child)
-
-    def append(self, child: MediumLevelILAstNode):
-        self._children.append(child)
-
-    @property
-    def children(self) -> list:
-        return list(self._children)
-
-    @property
-    def ast(self) -> MediumLevelILAst:
-        return self._ast
-
-
-class MediumLevelILAstSeqNode(MediumLevelILAstNode):
-    def __init__(self, ast: MediumLevelILAst, header: MediumLevelILBasicBlock):
-        if not isinstance(header, MediumLevelILBasicBlock):
-            raise TypeError(
-                f"header should be a MediumLevelILBasicBlock, got {type(header)}"
-            )
-        super().__init__(ast)
-        self._header = header
-
-    @property
-    def start(self):
-        return self._header.start
-
-    @property
-    def header(self):
-        return self._header
-
-    def __str__(self):
-        return f"<seq: header={self._header}, {len(self.children)} children>"
-
-    def __repr__(self):
-        return str(self)
-
-    def __eq__(self, other):
-        if not isinstance(other, type(self)):
-            return False
-
-        return self.header == other.header
-
-    def __hash__(self):
-        return hash(self.header)
-
-
-class MediumLevelILAstCondNode(MediumLevelILAstNode):
-    def __init__(self, ast: MediumLevelILAst, condition: MediumLevelILInstruction):
-        self._condition = condition
-        super().__init__(ast)
-
-    @property
-    def condition(self) -> MediumLevelILInstruction:
-        return self._condition
-
-    def __repr__(self):
-        return f"<cond: {self.condition}, {len(self.children)} children>"
-
-    def __getitem__(self, key):
-        if key:
-            return self._children[0]
-        else:
-            return self._children[1]
-
-
-class MediumLevelILAstLoopNode(MediumLevelILAstNode):
-    pass
-
-
-class MediumLevelILAstSwitchNode(MediumLevelILAstNode):
-    pass
-
-
-class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):
-    def __init__(self, ast: MediumLevelILAst, bb: MediumLevelILBasicBlock):
-        super().__init__(ast)
-        self._bb = bb
-
-    @property
-    def block(self) -> MediumLevelILBasicBlock:
-        return self._bb
-
-    @property
-    def start(self) -> int:
-        return self._bb.start
-
-    def __eq__(self, other):
-        if isinstance(other, MediumLevelILBasicBlock):
-            return self.block == other
-
-        if not isinstance(other, type(self)):
-            return False
-
-        return self.block == other.block
-
-    def __hash__(self):
-        return hash(self.block)
-
-    def __repr__(self):
-        return f'<bb block={self.block}>'
-
-class Region(object):
-    def __init__(
-        self,
-        ast: MediumLevelILAst,
-        header: MediumLevelILAstBasicBlockNode,
-        acyclic=True,
-        nodes=None,
-    ):
-        self._acyclic = acyclic
-        self._header = header
-        self._nodes = [] if nodes is None else nodes
-        self._ast = ast
-
-    @property
-    def acyclic(self):
-        return self._acyclic
-
-    @property
-    def header(self):
-        return self._header
-
-    @property
-    def start(self):
-        return self._header.block.start
-
-    @property
-    def nodes(self):
-        return list(self._nodes)
-
-    def append(self, node):
-        if not isinstance(node, MediumLevelILAstNode):
-            raise TypeError(f'node should be a MediumLevelILAstNode, got {type(node)}')
-
-        self._nodes.append(node)
-
-    def __iter__(self):
-        yield self._header
-        for n in self.nodes:
-            yield n
-
-    def __eq__(self, other):
-        if isinstance(other, MediumLevelILBasicBlock):
-            return self._header == other
-        if not isinstance(other, type(self)):
-            return False
-        
-        return self._header == other._header
-
-    def __hash__(self):
-        return hash(self.header.block)
-
-    def __repr__(self):
-        return f'<Region header={self._header} {len(self.nodes)} nodes>'
