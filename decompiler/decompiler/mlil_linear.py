@@ -5,7 +5,8 @@ from binaryninja import (BinaryView, DisassemblyTextLine,
 from collections import namedtuple
 from itertools import repeat
 
-from .ast import MediumLevelILAst, MediumLevelILAstCondNode, MediumLevelILAstSeqNode
+from .mlil_ast import MediumLevelILAst
+from .nodes import MediumLevelILAstCondNode, MediumLevelILAstSeqNode
 
 class MlilLinear(FlowGraph):
     def __init__(self, function):

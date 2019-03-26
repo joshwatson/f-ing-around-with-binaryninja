@@ -6,8 +6,6 @@ from binaryninja import MediumLevelILBasicBlock, MediumLevelILInstruction
 
 from . import mlil_ast
 
-print(dir(mlil_ast))
-
 class MediumLevelILAstNode(object):
     def __init__(self, ast: mlil_ast.MediumLevelILAst):
         self._children = deque()
@@ -46,7 +44,7 @@ class MediumLevelILAstSeqNode(MediumLevelILAstNode):
         return self._header
 
     def __str__(self):
-        return f"<seq: header={self._header}, {len(self.children)} children>"
+        return f"<seq: header={self._header}, {[c for c in self._children]}>"
 
     def __repr__(self):
         return str(self)
@@ -67,25 +65,49 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
         super().__init__(ast)
 
     @property
+    def start(self) -> int:
+        return self._children[0].start
+
+    @property
     def condition(self) -> MediumLevelILInstruction:
         return self._condition
 
     def __repr__(self):
-        return f"<cond: {self.condition}, {len(self.children)} children>"
+        return f"<cond: {self.condition}, {self[True]} {self[False]}>"
 
     def __getitem__(self, key):
         if key:
             return self._children[0]
         else:
-            return self._children[1]
+            return self._children[1] if len(self._children) > 1 else None
 
 
 class MediumLevelILAstLoopNode(MediumLevelILAstNode):
     pass
 
-
 class MediumLevelILAstSwitchNode(MediumLevelILAstNode):
-    pass
+    def __init__(self, ast: mlil_ast.MediumLevelILAst, switch: MediumLevelILInstruction):
+        self._switch = switch
+        self._cases = {}
+        super().__init__(ast)
+
+    @property
+    def cases(self):
+        return dict(self._cases)
+
+    @property
+    def switch(self):
+        return self._switch
+
+    @property
+    def start(self):
+        return self._switch.instr_index
+
+    def __setitem__(self, case, node):
+        self._cases[case] = node
+
+    def __getitem__(self, case):
+        return self._cases[case]
 
 
 class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):

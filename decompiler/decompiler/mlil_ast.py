@@ -185,10 +185,18 @@ class MediumLevelILAst(object):
         for bb in reversed(basic_blocks):
             if bb.start == 0:
                 continue
+
             if bb not in self._cycles:
                 if next((e for e in bb.outgoing_edges if e.back_edge), None):
                     # a back edge node isn't going to be the root of a region
                     continue
+
+                if bb[-1].operation == MediumLevelILOperation.MLIL_JUMP_TO:
+                    print("found a jump table")
+                    switch = bb[-1].dest.possible_values.mapping
+                    cases = [f"case {v}: {regions[next(b for b in self._function.basic_blocks if b.source_block.start == t)]}" for v, t in switch.items()]
+                    for case in cases:
+                        print(case)
 
                 # bb must be the head of an acyclic region (for the moment)
                 possible_region = self.dominated[bb]
@@ -202,10 +210,15 @@ class MediumLevelILAst(object):
                     if r in regions:
                         sub_region = regions[r]
 
-                        possible_region.remove(r)
-                        possible_region.add(self.convert_region_to_seq(sub_region))
+                        if sub_region.acyclic:
+                            if (self.generate_reaching_condition_MLIL(bb, r)):
+                                new_node = self.convert_region_to_cond(bb, sub_region)
+                            else:
+                                new_node = self.convert_region_to_seq(sub_region)
+                        else:
+                            new_node = self.convert_region_to_loop(sub_region)
 
-                        nodes.append(sub_region)
+                        nodes.append(new_node)
 
                         del regions[r]
                     else:
@@ -214,16 +227,17 @@ class MediumLevelILAst(object):
                 new_region = Region(
                     self, MediumLevelILAstBasicBlockNode(self, bb), nodes=nodes
                 )
-
             else:
                 possible_region = self.dominated[bb]
 
+                final_region = possible_region
+
                 for r in possible_region:
                     if next((e for e in r.outgoing_edges if e.back_edge), None):
-                        possible_region = possible_region - self.dominated[r]
+                        final_region = final_region - self.dominated[r]
 
                         # add r back to possible_region since it was in both
-                        possible_region.add(r)
+                        final_region.add(r)
 
                 new_region = Region(
                     self,
@@ -231,7 +245,7 @@ class MediumLevelILAst(object):
                     acyclic=False,
                     nodes=[
                         MediumLevelILAstBasicBlockNode(self, pr)
-                        for pr in possible_region
+                        for pr in final_region
                     ],
                 )
 
@@ -258,32 +272,35 @@ class MediumLevelILAst(object):
 
         return new_seq
 
+    def convert_region_to_cond(self, bb, sub_region):
+        reaching_condition = self.generate_reaching_condition_MLIL(
+            bb, sub_region.header.block
+        )
+
+        new_cond = MediumLevelILAstCondNode(self, reaching_condition)
+        
+        new_seq = self.convert_region_to_seq(sub_region)
+
+        new_cond.append(new_seq)
+            
+        return new_cond
+
+    def convert_region_to_loop(self, sub_region):
+        raise NotImplementedError("Loops aren't supported yet")
+
     def structure_acyclic_region(self, region_header, region):
         ordered_region = sorted(region, key=lambda i: i.start)
 
         region_node = MediumLevelILAstSeqNode(self, region_header)
 
         for current_node in ordered_region:
-            if current_node == region_header:
-                continue
-            reaching_condition = self.generate_reaching_condition_MLIL(
-                region_header, current_node
-            )
-            new_cond_node = MediumLevelILAstCondNode(self, reaching_condition)
-
-            if isinstance(current_node, Region):
-                new_seq = MediumLevelILAstSeqNode(self, current_node.header.block)
-                for n in current_node.nodes:
-                    new_seq.append(n)
-                new_cond_node.append(new_seq)
-            else:
-                new_cond_node.append(MediumLevelILAstSeqNode(self, current_node))
-            region_node.append(new_cond_node)
+            if current_node != region_header:
+                region_node.append(current_node)
 
         self._regions[region_header] = region_node
 
     def structure_cyclic_region(self, region_header, region):
-        pass
+        raise NotImplementedError("Loops aren't implemented yet")
 
     def order_regions(self):
 
@@ -320,16 +337,30 @@ class MediumLevelILAst(object):
     def generate_reaching_condition_MLIL(self, region_header, bb):
         or_exprs = []
 
-        for condition in self.reaching_conditions[
-            (
-                region_header,
-                bb if isinstance(bb, MediumLevelILBasicBlock) else bb.header.block,
-            )
-        ]:
+        start = region_header
+
+        if isinstance(bb, MediumLevelILAstSeqNode):
+            end = bb.header
+        if isinstance(bb, MediumLevelILAstCondNode):
+            end = bb[True].header
+        elif isinstance(bb, Region):
+            end = bb.header.block
+        else:
+            end = bb
+
+        for condition in self.reaching_conditions[(start, end)]:
             and_exprs = []
             for edge in condition:
                 if edge.type == BranchType.UnconditionalBranch:
                     continue
+                
+                # if edge.type == BranchType.IndirectBranch:
+                #     if edge.source[-1].operation == MediumLevelILOperation.MLIL_JUMP_TO:
+                #         case = next(
+                #             case
+                #             for case, target in edge.source[-1].dest.possible_values.mapping.items()
+                #             if target == bb.source_block.start
+                #         )
 
                 if edge.type == BranchType.TrueBranch:
                     and_exprs.append(edge.source[-1].condition.expr_index)
@@ -340,15 +371,15 @@ class MediumLevelILAst(object):
                             edge.source[-1].condition.expr_index,
                         ).index
                     )
-
-            or_exprs.append(
-                reduce(
-                    lambda i, j: self._function.expr(
-                        MediumLevelILOperation.MLIL_AND, i, j
-                    ).index,
-                    and_exprs,
+            if and_exprs:
+                or_exprs.append(
+                    reduce(
+                        lambda i, j: self._function.expr(
+                            MediumLevelILOperation.MLIL_AND, i, j
+                        ).index,
+                        and_exprs,
+                    )
                 )
-            )
 
         return MediumLevelILInstruction(
             self._function,
@@ -358,7 +389,7 @@ class MediumLevelILAst(object):
                 ).index,
                 or_exprs,
             ),
-        )
+        ) if or_exprs else None
 
     def __str__(self):
         output = ""

@@ -58,4 +58,7 @@ class Region(object):
         return hash(self.header.block)
 
     def __repr__(self):
-        return f"<Region header={self._header} {len(self.nodes)} nodes>"
+        _repr = f"<Region header={self._header} nodes:\n\t"
+        _repr += '\n\t'.join(map(str, self.nodes))
+        _repr += '>'
+        return _repr
