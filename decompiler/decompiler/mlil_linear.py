@@ -6,7 +6,7 @@ from collections import namedtuple
 from itertools import repeat
 
 from .mlil_ast import MediumLevelILAst
-from .nodes import MediumLevelILAstCondNode, MediumLevelILAstSeqNode
+from .nodes import MediumLevelILAstCondNode, MediumLevelILAstSeqNode, MediumLevelILAstSwitchNode
 
 class MlilLinear(FlowGraph):
     def __init__(self, function):
@@ -82,7 +82,7 @@ class MlilLinear(FlowGraph):
                         f'{" "*indent}'
                     ),
                     InstructionTextToken(
-                        InstructionTextTokenType.OpcodeToken,
+                        InstructionTextTokenType.KeywordToken,
                         "if"
                     ),
                     InstructionTextToken(
@@ -92,17 +92,67 @@ class MlilLinear(FlowGraph):
                     *current_node.condition.tokens,
                     InstructionTextToken(
                         InstructionTextTokenType.TextToken,
-                            ") "
-                    ),
-                    InstructionTextToken(
-                        InstructionTextTokenType.OpcodeToken,
-                        "then:"
+                            "):"
                     )
                 ]
 
                 node.lines += [il_line]
 
                 to_visit += zip(reversed(current_node.children), repeat(indent + 4))
+
+            elif isinstance(current_node, MediumLevelILAstSwitchNode):
+                il_line = DisassemblyTextLine([], current_node.switch.instr_index)
+
+                il_line.tokens += [
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                        f'{" "*indent}'
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.KeywordToken,
+                        "switch"
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                            " ("
+                    ),
+                    *current_node.switch.tokens,
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                            "):"
+                    ),
+                ]
+
+                node.lines += [il_line]
+
+                to_visit += zip(reversed(sorted(current_node.cases.items(), key=lambda i: i[0])), repeat(indent + 4))
+
+            elif isinstance(current_node, tuple):
+                il_line = DisassemblyTextLine([], current_node[1].start)
+
+                il_line.tokens += [
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                        f'{" "*indent}'
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.OpcodeToken,
+                        "case "
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.IntegerToken,
+                        str(current_node[0]),
+                        current_node[0]
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                            ":"
+                    ),
+                ]
+
+                node.lines += [il_line]
+
+                to_visit += [(current_node[1], indent + 4)]
 
             prev_indent = indent
 

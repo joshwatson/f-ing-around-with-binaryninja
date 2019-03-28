@@ -73,7 +73,7 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
         return self._condition
 
     def __repr__(self):
-        return f"<cond: {self.condition}, {self[True]} {self[False]}>"
+        return f"<cond: start={self.start} {self.condition} -> ({self[True]} | {self[False]})>"
 
     def __getitem__(self, key):
         if key:
@@ -108,6 +108,9 @@ class MediumLevelILAstSwitchNode(MediumLevelILAstNode):
 
     def __getitem__(self, case):
         return self._cases[case]
+
+    def __repr__(self):
+        return f"<switch: start={self.start} {len(self._cases)} cases>"
 
 
 class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):

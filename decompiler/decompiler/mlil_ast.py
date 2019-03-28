@@ -14,6 +14,8 @@ from binaryninja import (
     VariableSourceType,
     ILBranchDependence,
     InstructionTextTokenType,
+    PossibleValueSet,
+    RegisterValueType
 )
 
 from .region import Region
@@ -22,6 +24,7 @@ from .nodes import (
     MediumLevelILAstSeqNode,
     MediumLevelILAstCondNode,
     MediumLevelILAstBasicBlockNode,
+    MediumLevelILAstSwitchNode
 )
 from .condition_visitor import ConditionVisitor
 
@@ -180,7 +183,7 @@ class MediumLevelILAst(object):
     def _find_regions(self):
         basic_blocks = self._function.basic_blocks
 
-        regions = {}
+        regions = self._regions
 
         for bb in reversed(basic_blocks):
             if bb.start == 0:
@@ -191,18 +194,29 @@ class MediumLevelILAst(object):
                     # a back edge node isn't going to be the root of a region
                     continue
 
+                is_switch = False
                 if bb[-1].operation == MediumLevelILOperation.MLIL_JUMP_TO:
-                    print("found a jump table")
                     switch = bb[-1].dest.possible_values.mapping
-                    cases = [f"case {v}: {regions[next(b for b in self._function.basic_blocks if b.source_block.start == t)]}" for v, t in switch.items()]
-                    for case in cases:
-                        print(case)
+                    cases = {regions[next(b for b in self._function.basic_blocks if b.source_block.start == t)]: v for v, t in switch.items()}
+
+                    is_switch = True
+
+                    # TODO: figure out fall through cases
+                    switch_condition = self._find_switch_condition(bb[-1].dest, switch.keys())
+                    switch_node = MediumLevelILAstSwitchNode(self, switch_condition)
 
                 # bb must be the head of an acyclic region (for the moment)
                 possible_region = self.dominated[bb]
+
                 for c in self._cycles:
                     if c in possible_region:
                         possible_region = possible_region - self.dominated[c]
+
+                # remove any nodes dominated by existing regions
+                for r in regions:
+                    if r in possible_region:
+                        possible_region = possible_region - self.dominated[r]
+                        possible_region.add(r)
 
                 # remove any sub regions from our list of regions
                 nodes = []
@@ -218,15 +232,26 @@ class MediumLevelILAst(object):
                         else:
                             new_node = self.convert_region_to_loop(sub_region)
 
-                        nodes.append(new_node)
+                        if not is_switch:
+                            nodes.append(new_node)
+                        else:
+                            if r not in cases:
+                                nodes.append(new_node)
+                            else:
+                                switch_node[cases[r]] = new_node
 
                         del regions[r]
                     else:
                         nodes.append(r)
 
+                if is_switch:
+                    nodes.append(switch_node)
+
                 new_region = Region(
                     self, MediumLevelILAstBasicBlockNode(self, bb), nodes=nodes
                 )
+                
+                new_region = self.structure_acyclic_region(bb, new_region)
             else:
                 possible_region = self.dominated[bb]
 
@@ -249,9 +274,53 @@ class MediumLevelILAst(object):
                     ],
                 )
 
+                new_region = self.structure_cyclic_region(bb, new_region)
+
             regions[bb] = new_region
 
         return regions
+
+    def _find_switch_condition(self, dest, cases):
+        def check_ranges(ranges, cases):
+            for r in ranges:
+                for i in range(r.start, r.end, r.step):
+                    if i not in cases:
+                        return False
+
+            return True
+
+        to_visit = dest.operands
+        while to_visit:
+            current_operand = to_visit.pop()
+            if not isinstance(current_operand, MediumLevelILInstruction):
+                continue
+
+            to_visit += current_operand.operands
+
+            pv = current_operand.possible_values
+            if not isinstance(pv, PossibleValueSet):
+                continue
+
+            if pv.type not in (
+                RegisterValueType.UnsignedRangeValue,
+                RegisterValueType.SignedRangeValue,
+                RegisterValueType.InSetOfValues
+            ):
+                continue
+
+            if pv.type != RegisterValueType.InSetOfValues:
+                if not check_ranges(pv.ranges, cases):
+                    continue
+                else:
+                    return current_operand
+
+            # If it's InSetOfValues, check to make sure
+            # all of the values are in pv.values
+            if (all(v in cases for v in pv.values) and
+                    len(cases) == len(pv.values)):
+                return current_operand
+            else:
+                continue
 
     def _structure_regions(self):
         for header, region in sorted(self._regions.items(), key=lambda i: i[0].start):
@@ -289,15 +358,14 @@ class MediumLevelILAst(object):
         raise NotImplementedError("Loops aren't supported yet")
 
     def structure_acyclic_region(self, region_header, region):
-        ordered_region = sorted(region, key=lambda i: i.start)
-
-        region_node = MediumLevelILAstSeqNode(self, region_header)
-
-        for current_node in ordered_region:
-            if current_node != region_header:
-                region_node.append(current_node)
-
-        self._regions[region_header] = region_node
+        return Region(
+            self,
+            MediumLevelILAstBasicBlockNode(self, region_header),
+            nodes=[
+                n
+                for n in sorted(region.nodes, key=lambda i: i.start)
+            ]
+        )
 
     def structure_cyclic_region(self, region_header, region):
         raise NotImplementedError("Loops aren't implemented yet")
@@ -330,6 +398,11 @@ class MediumLevelILAst(object):
                 else:
                     raise NotImplementedError("I have never seen this")
 
+            if node.acyclic:
+                node = self.convert_region_to_seq(node)
+            else:
+                node = self.convert_region_to_loop(node)
+
             new_region_node.append(node)
 
             self._regions[header] = new_region_node
@@ -351,16 +424,14 @@ class MediumLevelILAst(object):
         for condition in self.reaching_conditions[(start, end)]:
             and_exprs = []
             for edge in condition:
+                # if the edge isn't in the branch_dependence, we
+                # can ignore it for the reaching conditions
+                if edge.source.end - 1 not in end[0].branch_dependence:
+                    continue
+
+                # we also ignore unconditional branches
                 if edge.type == BranchType.UnconditionalBranch:
                     continue
-                
-                # if edge.type == BranchType.IndirectBranch:
-                #     if edge.source[-1].operation == MediumLevelILOperation.MLIL_JUMP_TO:
-                #         case = next(
-                #             case
-                #             for case, target in edge.source[-1].dest.possible_values.mapping.items()
-                #             if target == bb.source_block.start
-                #         )
 
                 if edge.type == BranchType.TrueBranch:
                     and_exprs.append(edge.source[-1].condition.expr_index)
@@ -435,6 +506,14 @@ class MediumLevelILAst(object):
             elif isinstance(node, MediumLevelILAstCondNode):
                 output += f'{" "*indent}if ({node.condition}) then:\n'
                 to_visit += zip(reversed(node.children), repeat(indent + 4))
+
+            elif isinstance(node, MediumLevelILAstSwitchNode):
+                output += f'{" "*indent}switch({node.switch}):\n'
+                to_visit += zip(reversed(sorted(node.cases.items(), key=lambda i: i[0])), repeat(indent + 4))
+
+            elif isinstance(node, tuple):
+                output += f'{" "*indent}case {node[0]}:\n'
+                to_visit += [(node[1], indent + 4)]
 
             prev_indent = indent
 
