@@ -5,7 +5,6 @@ from . import mlil_ast
 try:
     from binaryninjaui import ViewType
 
-    from .mlil_linear import MlilLinearViewType
     from .linear_mlil import LinearMLILViewType
 
     # ViewType.registerViewType(MlilLinearViewType())
