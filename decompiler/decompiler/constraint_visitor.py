@@ -22,7 +22,7 @@ class ConstraintVisitor:
         if hasattr(self, method_name):
             value = getattr(self, method_name)(expression)
         else:
-            print(f'visit_{method_name} missing')
+            log_debug(f'visit_{method_name} missing')
             value = None
         return value
 
@@ -161,10 +161,10 @@ class ConstraintVisitor:
 
             if member is None:
                 # TODO: Convert the extract into (blah) & ~((1<<start)-1)
-                print(f"member is None {expr!r}")
+                log_debug(f"member is None {expr!r}")
 
         elif expr.decl().name().startswith('mem('):
-            print(expr)
+            log_debug(f"{expr}")
             return []
 
         else:

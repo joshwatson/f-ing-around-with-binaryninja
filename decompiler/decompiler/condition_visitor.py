@@ -1,8 +1,9 @@
 from .bnilvisitor import BNILVisitor
+from functools import reduce
 
 from binaryninja import (Variable, VariableSourceType)
 
-from z3 import (BitVec, And, Or, Not, Solver, simplify, Extract, UGT, ULE, Array, BitVecSort, Concat, Bool)
+from z3 import (BitVec, And, Or, Not, Solver, Tactic, Extract, UGT, ULE, Array, BitVecSort, Concat, Bool)
 
 def make_variable(var: Variable):
     if var.name == '':
@@ -21,7 +22,12 @@ def make_load(src, size):
 
 class ConditionVisitor(BNILVisitor):
     def simplify(self, condition):
-        return simplify(self.visit(condition))
+        return reduce(
+            And,
+            Tactic('ctx-solver-simplify')(self.visit(condition))[0]
+        )
+            
+            
 
     def visit_MLIL_CMP_E(self, expr):
         left = self.visit(expr.left)

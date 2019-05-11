@@ -19,33 +19,27 @@
 # IN THE SOFTWARE.
 
 from collections import namedtuple
+from functools import cmp_to_key
 from itertools import repeat
 
-from binaryninja import InstructionTextToken, MediumLevelILBasicBlock, Settings
-from binaryninja.enums import (
-    DisassemblyOption,
-    InstructionTextTokenType,
-    LinearDisassemblyLineType,
-)
+from z3 import Not
+
+from binaryninja import InstructionTextToken, MediumLevelILBasicBlock, Settings, log_info
+from binaryninja.enums import (DisassemblyOption, InstructionTextTokenType,
+                               LinearDisassemblyLineType)
 from binaryninja.function import DisassemblyTextLine, DisassemblyTextRenderer
 from binaryninja.lineardisassembly import LinearDisassemblyLine
 from binaryninja.mediumlevelil import MediumLevelILOperation
-from binaryninjaui import TokenizedTextView, TokenizedTextViewHistoryEntry, ViewType
+from binaryninjaui import (TokenizedTextView, TokenizedTextViewHistoryEntry,
+                           ViewType)
 from PySide2.QtCore import Qt
 
-from .mlil_ast import MediumLevelILAst
-from .nodes import (
-    MediumLevelILAstCondNode,
-    MediumLevelILAstElseNode,
-    MediumLevelILAstSeqNode,
-    MediumLevelILAstSwitchNode,
-    MediumLevelILAstLoopNode,
-    MediumLevelILAstBasicBlockNode,
-    MediumLevelILAstBreakNode
-)
 from .constraint_visitor import ConstraintVisitor
-
-from functools import cmp_to_key
+from .mlil_ast import MediumLevelILAst
+from .nodes import (MediumLevelILAstBasicBlockNode, MediumLevelILAstBreakNode,
+                    MediumLevelILAstCondNode, MediumLevelILAstElseNode,
+                    MediumLevelILAstLoopNode, MediumLevelILAstSeqNode,
+                    MediumLevelILAstSwitchNode)
 
 
 class LinearMLILView(TokenizedTextView):
@@ -103,44 +97,18 @@ class LinearMLILView(TokenizedTextView):
         )
 
         line_index = 0
-        for il in ast.root.block:
-            if (il.instr_index == ast.root.block[-1].instr_index) and il.operation in (
-                MediumLevelILOperation.MLIL_IF,
-                MediumLevelILOperation.MLIL_JUMP_TO,
-                MediumLevelILOperation.MLIL_GOTO,
-                MediumLevelILOperation.MLIL_NORET,
-            ):
-                continue
 
-            il_lines, _ = renderer.get_disassembly_text(il.instr_index)
-            for line in il_lines:
-                result.append(
-                    LinearDisassemblyLine(
-                        LinearDisassemblyLineType.CodeDisassemblyLineType,
-                        self.function,
-                        il.il_basic_block,
-                        line_index,
-                        line,
-                    )
-                )
-                line_index += 1
-
-        to_visit = [
-            (n, 0)
-            for header, n in sorted(
-                ast._regions.items(), key=cmp_to_key(lambda i, j: 1 if ast.reaching_conditions.get((i[0], j[0])) is None else 1 if i.start > j.start else -1), reverse=True
-            )
-        ]
+        to_visit = [(ast.regions[0][1], 0)]
 
         prev_indent = 0
         indent = 0
-        last_il = il
-        use_else_condition = False
+        il = self.function.mlil[0]
+        last_il = self.function.mlil[0]
         while to_visit:
             current_node, indent = to_visit.pop()
 
             if indent < prev_indent:
-                for i in range(prev_indent-4, indent-4, -4):
+                for i in range(prev_indent - 4, indent - 4, -4):
                     result.append(
                         LinearDisassemblyLine(
                             LinearDisassemblyLineType.CodeDisassemblyLineType,
@@ -150,8 +118,7 @@ class LinearMLILView(TokenizedTextView):
                             DisassemblyTextLine(
                                 [
                                     InstructionTextToken(
-                                        InstructionTextTokenType.TextToken,
-                                        f'{" "*i}}}',
+                                        InstructionTextTokenType.TextToken, f'{" "*i}}}'
                                     )
                                 ],
                                 last_il.address,
@@ -159,113 +126,10 @@ class LinearMLILView(TokenizedTextView):
                         )
                     )
 
-            if isinstance(current_node, MediumLevelILAstSeqNode):
-                if isinstance(current_node, MediumLevelILAstElseNode):
-                    il_line = DisassemblyTextLine([], current_node.header.start)
+            if current_node.type == 'seq':
+                to_visit += zip(reversed(current_node.nodes), repeat(indent))
 
-                    if use_else_condition:
-                        il_line.tokens += [
-                            InstructionTextToken(
-                                InstructionTextTokenType.TextToken, f'{" "*indent}'
-                            ),
-                            InstructionTextToken(InstructionTextTokenType.KeywordToken, "if"),
-                            InstructionTextToken(InstructionTextTokenType.TextToken, " ("),
-                            *current_node.condition.tokens,
-                            InstructionTextToken(InstructionTextTokenType.TextToken, ") {"),
-                        ]
-
-                        result.append(
-                            LinearDisassemblyLine(
-                                LinearDisassemblyLineType.CodeDisassemblyLineType,
-                                self.function,
-                                il.il_basic_block,
-                                line_index,
-                                il_line,
-                            )
-                        )
-                    else:
-                        il_line.tokens += [
-                            InstructionTextToken(
-                                InstructionTextTokenType.TextToken, f'{" "*indent}'
-                            ),
-                            InstructionTextToken(
-                                InstructionTextTokenType.KeywordToken, "else"
-                            ),
-                            InstructionTextToken(InstructionTextTokenType.TextToken, " {"),
-                        ]
-
-                        result.append(
-                            LinearDisassemblyLine(
-                                LinearDisassemblyLineType.CodeDisassemblyLineType,
-                                self.function,
-                                current_node.header,
-                                line_index,
-                                il_line,
-                            )
-                        )
-
-                    indent += 4
-                    line_index += 1
-
-                if isinstance(current_node.header, MediumLevelILBasicBlock):
-                    for il in current_node.header:
-                        if (
-                            il.instr_index == current_node.header.end - 1
-                        ) and il.operation in (
-                            MediumLevelILOperation.MLIL_IF,
-                            MediumLevelILOperation.MLIL_JUMP_TO,
-                            MediumLevelILOperation.MLIL_GOTO,
-                            MediumLevelILOperation.MLIL_NORET,
-                        ):
-                            continue
-
-                        il_lines, length = renderer.get_disassembly_text(il.instr_index)
-
-                        for line in il_lines:
-                            line.tokens.insert(
-                                0,
-                                InstructionTextToken(
-                                    InstructionTextTokenType.TextToken, f'{" "*indent}'
-                                ),
-                            )
-
-                            result.append(
-                                LinearDisassemblyLine(
-                                    LinearDisassemblyLineType.CodeDisassemblyLineType,
-                                    self.function,
-                                    il.il_basic_block,
-                                    line_index,
-                                    line,
-                                )
-                            )
-
-                elif isinstance(current_node.header, MediumLevelILAstBreakNode):
-                    il_line = DisassemblyTextLine([], current_node.header.address)
-
-                    il_line.tokens += [
-                        InstructionTextToken(
-                            InstructionTextTokenType.TextToken, f'{" "*indent}'
-                        ),
-                        InstructionTextToken(
-                            InstructionTextTokenType.TextToken, "break"
-                        )
-                    ]
-
-                    result.append(
-                        LinearDisassemblyLine(
-                            LinearDisassemblyLineType.CodeDisassemblyLineType,
-                            self.function,
-                            il.il_basic_block,
-                            line_index,
-                            il_line,
-                        )
-                    )
-
-                line_index += 1
-
-                to_visit += zip(reversed(current_node.children), repeat(indent))
-
-            elif isinstance(current_node, MediumLevelILAstBasicBlockNode):
+            elif current_node.type == 'block':
                 for il in current_node.block:
                     if (
                         il.instr_index == current_node.block.end - 1
@@ -277,7 +141,7 @@ class LinearMLILView(TokenizedTextView):
                     ):
                         continue
 
-                    il_lines, length = renderer.get_disassembly_text(il.instr_index)
+                    il_lines, _ = renderer.get_disassembly_text(il.instr_index)
 
                     for line in il_lines:
                         line.tokens.insert(
@@ -299,78 +163,7 @@ class LinearMLILView(TokenizedTextView):
 
                         line_index += 1
 
-            elif isinstance(current_node, MediumLevelILBasicBlock):
-                for il in current_node:
-                    if (
-                        il.instr_index == current_node.end - 1
-                    ) and il.operation in (
-                        MediumLevelILOperation.MLIL_IF,
-                        MediumLevelILOperation.MLIL_JUMP_TO,
-                        MediumLevelILOperation.MLIL_GOTO,
-                        MediumLevelILOperation.MLIL_NORET,
-                    ):
-                        continue
-
-                    il_lines, length = renderer.get_disassembly_text(il.instr_index)
-
-                    for line in il_lines:
-                        line.tokens.insert(
-                            0,
-                            InstructionTextToken(
-                                InstructionTextTokenType.TextToken, f'{" "*indent}'
-                            ),
-                        )
-
-                        result.append(
-                            LinearDisassemblyLine(
-                                LinearDisassemblyLineType.CodeDisassemblyLineType,
-                                self.function,
-                                il.il_basic_block,
-                                line_index,
-                                line,
-                            )
-                        )
-
-                        line_index += 1
-
-            elif isinstance(current_node, MediumLevelILAstCondNode):
-                use_else_condition = False
-
-                condition = ConstraintVisitor(self.function).visit(current_node.condition)
-
-                il_line = DisassemblyTextLine([], current_node.address)
-
-                if current_node[True] is not None:
-                    il_line.tokens += [
-                        InstructionTextToken(
-                            InstructionTextTokenType.TextToken, f'{" "*indent}'
-                        ),
-                        InstructionTextToken(InstructionTextTokenType.KeywordToken, "if"),
-                        InstructionTextToken(InstructionTextTokenType.TextToken, " ("),
-                        *condition,
-                        InstructionTextToken(InstructionTextTokenType.TextToken, ") {"),
-                    ]
-
-                    result.append(
-                        LinearDisassemblyLine(
-                            LinearDisassemblyLineType.CodeDisassemblyLineType,
-                            self.function,
-                            il.il_basic_block,
-                            line_index,
-                            il_line,
-                        )
-                    )
-
-                line_index += 1
-
-                to_visit.append((current_node[False], indent))
-
-                if current_node[True] is not None:
-                    to_visit.append((current_node[True], indent + 4))
-                else:
-                    use_else_condition = True
-
-            elif isinstance(current_node, MediumLevelILAstBreakNode):
+            elif current_node.type == 'break':
                 il_line = DisassemblyTextLine([], current_node.address)
 
                 il_line.tokens += [
@@ -379,7 +172,7 @@ class LinearMLILView(TokenizedTextView):
                     ),
                     InstructionTextToken(
                         InstructionTextTokenType.TextToken, "break"
-                    )
+                    ),
                 ]
 
                 result.append(
@@ -394,11 +187,88 @@ class LinearMLILView(TokenizedTextView):
 
                 line_index += 1
 
-            elif isinstance(current_node, MediumLevelILAstLoopNode):
-                if current_node.condition is not None:
-                    condition = ConstraintVisitor(self.function).visit(current_node.condition)
+            elif current_node.type == 'cond':
+                if current_node[True] is not None:
+                    condition = ConstraintVisitor(self.function).visit(
+                        current_node.condition
+                    )
+                elif current_node[False] is not None:
+                    condition = ConstraintVisitor(self.function).visit(
+                        Not(current_node.condition)
+                    )
 
-                    il_line = DisassemblyTextLine([], current_node.loop[0].address)
+                il_line = DisassemblyTextLine([], current_node.address)
+
+                il_line.tokens += [
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken, f'{" "*indent}'
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.KeywordToken, "if"
+                    ),
+                    InstructionTextToken(InstructionTextTokenType.TextToken, " ("),
+                    *condition,
+                    InstructionTextToken(InstructionTextTokenType.TextToken, ") {"),
+                ]
+
+                result.append(
+                    LinearDisassemblyLine(
+                        LinearDisassemblyLineType.CodeDisassemblyLineType,
+                        self.function,
+                        il.il_basic_block,
+                        line_index,
+                        il_line,
+                    )
+                )
+
+                line_index += 1
+
+                if current_node[False] is not None:
+                    to_visit.append((current_node[False], indent + 4))
+
+                    # Append a node that will tell us that the next node is 
+                    # an else block
+                    if current_node[True] is not None:
+                        to_visit.append(
+                            (MediumLevelILAstElseNode(self, current_node.address), indent)
+                        )
+
+                if current_node[True] is not None:
+                    to_visit.append((current_node[True], indent + 4))
+
+            elif current_node.type == 'else':
+                il_line = DisassemblyTextLine([], current_node.address)
+
+                il_line.tokens += [
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken, f'{" "*indent}'
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.KeywordToken, "else"
+                    ),
+                    InstructionTextToken(InstructionTextTokenType.TextToken, " {")
+                ]
+
+                result.append(
+                    LinearDisassemblyLine(
+                        LinearDisassemblyLineType.CodeDisassemblyLineType,
+                        self.function,
+                        il.il_basic_block,
+                        line_index,
+                        il_line,
+                    )
+                )
+
+                line_index += 1
+
+            elif current_node.type == 'loop':
+                log_info("current_node.type == loop")
+                if current_node.condition is not None:
+                    condition = ConstraintVisitor(self.function).visit(
+                        current_node.condition
+                    )
+
+                    il_line = DisassemblyTextLine([], current_node.address)
 
                     il_line.tokens += [
                         InstructionTextToken(
@@ -427,44 +297,9 @@ class LinearMLILView(TokenizedTextView):
                 else:
                     raise NotImplementedError("Don't know how to do this yet")
 
-                indent += 4
+                to_visit += zip(reversed(current_node.body.nodes), repeat(indent + 4))
 
-                for il in current_node.loop:
-                    if (
-                        il.instr_index == current_node.loop.end - 1
-                    ) and il.operation in (
-                        MediumLevelILOperation.MLIL_IF,
-                        MediumLevelILOperation.MLIL_JUMP_TO,
-                        MediumLevelILOperation.MLIL_GOTO,
-                        MediumLevelILOperation.MLIL_NORET,
-                    ):
-                        continue
-
-                    il_lines, length = renderer.get_disassembly_text(il.instr_index)
-
-                    for line in il_lines:
-                        line.tokens.insert(
-                            0,
-                            InstructionTextToken(
-                                InstructionTextTokenType.TextToken, f'{" "*indent}'
-                            ),
-                        )
-
-                        result.append(
-                            LinearDisassemblyLine(
-                                LinearDisassemblyLineType.CodeDisassemblyLineType,
-                                self.function,
-                                il.il_basic_block,
-                                line_index,
-                                line,
-                            )
-                        )
-
-                        line_index += 1
-
-                to_visit += zip(reversed(current_node.children), repeat(indent))
-
-            elif isinstance(current_node, MediumLevelILAstSwitchNode):
+            elif current_node.type == 'switch':
                 il_line = DisassemblyTextLine([], current_node.switch.address)
 
                 il_line.tokens += [
@@ -607,24 +442,24 @@ class LinearMLILViewType(ViewType):
     def __init__(self):
         super(LinearMLILViewType, self).__init__("Linear MLIL", "Linear MLIL")
         settings = Settings()
-        settings.register_group('linearmlil', 'Linear MLIL')
+        settings.register_group("linearmlil", "Linear MLIL")
         settings.register_setting(
-            'linearmlil.priority', 
+            "linearmlil.priority",
             (
-            '''{
+                """{
                 "description": "Set the priority for the Linear MLIL view.",
                 "title": "View Priority",
                 "default" : 100,
                 "type" : "number",
                 "id" : "priority"
-            }'''
-            )
+            }"""
+            ),
         )
 
     def getPriority(self, data, filename):
         if data.executable:
             # Higher priority will make this view the default
-            priority = Settings().get_integer('linearmlil.priority', data)
+            priority = Settings().get_integer("linearmlil.priority", data)
             return priority
         return 0
 
