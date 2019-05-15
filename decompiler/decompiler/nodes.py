@@ -27,12 +27,17 @@ class MediumLevelILAstNode(object):
     def start(self):
         return None
 
+    @property
+    def block(self):
+        return None
+
     def __lt__(self, other):
         log_debug("MediumLevelILAstNode.__lt__")
         result = (
             True 
             if self._ast.reaching_conditions.get((self.block, other.block)) is not None
-            else False
+            else True
+            if self.start < other.start else False
         )
         log_debug(f"{self} < {other} == {result}")
         return result
@@ -90,9 +95,13 @@ class MediumLevelILAstSeqNode(MediumLevelILAstNode):
         if not len(self._nodes):
             return
 
-        for idx, node in enumerate(self._nodes):
-            if node.type == 'seq' and len(node.nodes) == 1:
-                self._nodes[idx] = node.nodes[0]
+        flattened_nodes = []
+        for node in self.nodes:
+            if node.type == 'seq':
+                flattened_nodes += node.nodes
+            else:
+                flattened_nodes.append(node)
+        self._nodes = flattened_nodes
 
     @property
     def start(self):
@@ -167,12 +176,14 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
         new_conditions = []
 
         for node in nodes:
+            if node[False] is not None:
+                return
             log_debug(f"+ {node._condition}")
             node._condition = reduce(
                 And,
                 Tactic('ctx-solver-simplify')(And(self._condition, node._condition))[0]
             )
-            log_debug(f"{node._condition}")
+            log_debug(f"flattened condition: {node._condition}")
             new_conditions.append(node)
 
         self.__class__ = MediumLevelILAstSeqNode
@@ -305,7 +316,7 @@ class MediumLevelILAstSwitchNode(MediumLevelILAstNode):
         self._switch = switch
         self._cases = {}
         super().__init__(ast)
-        super._type = "switch"
+        self._type = "switch"
         self._start = start
         self._address = address
 
@@ -336,6 +347,9 @@ class MediumLevelILAstSwitchNode(MediumLevelILAstNode):
 
     def __repr__(self):
         return f"<switch: start={self.start} {len(self._cases)} cases>"
+
+    def __hash__(self):
+        return hash(self.start)
 
 
 class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):

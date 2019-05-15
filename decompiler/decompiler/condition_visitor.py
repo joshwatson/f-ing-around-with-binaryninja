@@ -3,7 +3,7 @@ from functools import reduce
 
 from binaryninja import (Variable, VariableSourceType)
 
-from z3 import (BitVec, And, Or, Not, Solver, Tactic, Extract, UGT, ULE, Array, BitVecSort, Concat, Bool)
+from z3 import (BitVec, And, Or, Not, Solver, Tactic, Extract, UGT, ULE, Array, BitVecSort, Concat, Bool, BoolVal)
 
 def make_variable(var: Variable):
     if var.name == '':
@@ -22,12 +22,22 @@ def make_load(src, size):
 
 class ConditionVisitor(BNILVisitor):
     def simplify(self, condition):
+        visit_result = self.visit(condition)
+        
+        if visit_result.sort().name() != 'Bool':
+            return visit_result
+        result = Tactic('ctx-solver-simplify')(visit_result)[0]
+
+        if len(result) == 0:
+            return BoolVal(True)
+
+        if len(result) < 2:
+            return result[0]
+
         return reduce(
             And,
-            Tactic('ctx-solver-simplify')(self.visit(condition))[0]
+            result
         )
-            
-            
 
     def visit_MLIL_CMP_E(self, expr):
         left = self.visit(expr.left)
