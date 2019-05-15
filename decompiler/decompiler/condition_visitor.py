@@ -1,32 +1,49 @@
-from .bnilvisitor import BNILVisitor
 from functools import reduce
 
-from binaryninja import (Variable, VariableSourceType)
+from z3 import (
+    UGT,
+    ULE,
+    And,
+    Array,
+    BitVec,
+    BitVecSort,
+    BoolVal,
+    Concat,
+    Extract,
+    Not,
+    Or,
+    Tactic,
+)
 
-from z3 import (BitVec, And, Or, Not, Solver, Tactic, Extract, UGT, ULE, Array, BitVecSort, Concat, Bool, BoolVal)
+from binaryninja import Variable, VariableSourceType
+
+from .bnilvisitor import BNILVisitor
+
 
 def make_variable(var: Variable):
-    if var.name == '':
+    if var.name == "":
         if var.source_type == VariableSourceType.RegisterVariableSourceType:
             var.name = var.function.arch.get_reg_by_index(var.storage)
         else:
             raise NotImplementedError()
     return BitVec(var.name, var.type.width * 8)
 
-def make_load(src, size):
-    mem = Array('mem', BitVecSort(32), BitVecSort(8))
 
-    load_bytes = [mem[src+i] for i in range(0, size)]
+def make_load(src, size):
+    mem = Array("mem", BitVecSort(32), BitVecSort(8))
+
+    load_bytes = [mem[src + i] for i in range(0, size)]
 
     return Concat(*load_bytes)
+
 
 class ConditionVisitor(BNILVisitor):
     def simplify(self, condition):
         visit_result = self.visit(condition)
-        
-        if visit_result.sort().name() != 'Bool':
+
+        if visit_result.sort().name() != "Bool":
             return visit_result
-        result = Tactic('ctx-solver-simplify')(visit_result)[0]
+        result = Tactic("ctx-solver-simplify")(visit_result)[0]
 
         if len(result) == 0:
             return BoolVal(True)
@@ -34,10 +51,7 @@ class ConditionVisitor(BNILVisitor):
         if len(result) < 2:
             return result[0]
 
-        return reduce(
-            And,
-            result
-        )
+        return reduce(And, result)
 
     def visit_MLIL_CMP_E(self, expr):
         left = self.visit(expr.left)
@@ -85,14 +99,14 @@ class ConditionVisitor(BNILVisitor):
         offset = expr.offset
         size = expr.size
 
-        return Extract(((offset+size)*8)-1, (offset*8), src)
+        return Extract(((offset + size) * 8) - 1, (offset * 8), src)
 
     def visit_MLIL_VAR(self, expr):
         return make_variable(expr.src)
 
     def visit_MLIL_CONST(self, expr):
         if expr.size == 0 and expr.constant in (0, 1):
-            return Bool('b') == Bool('b') if expr.constant else Bool('b') != Bool('b')
+            return BoolVal(True) if expr.constant else BoolVal(False)
         return expr.constant
 
     def visit_MLIL_NOT(self, expr):
@@ -109,7 +123,12 @@ class ConditionVisitor(BNILVisitor):
         return left + right
 
     def visit_MLIL_ADDRESS_OF(self, expr):
-        return BitVec(f'&{expr.src.name}', (expr.size * 8) if expr.size else expr.function.source_function.view.address_size * 8)
+        return BitVec(
+            f"&{expr.src.name}",
+            (expr.size * 8)
+            if expr.size
+            else expr.function.source_function.view.address_size * 8,
+        )
 
     def visit_MLIL_LSL(self, expr):
         left, right = self.visit_both_sides(expr)

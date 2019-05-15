@@ -1,14 +1,20 @@
 from __future__ import annotations
 
-from collections import deque
 from functools import reduce
 
-from binaryninja import MediumLevelILBasicBlock, MediumLevelILInstruction, log_debug, log_info, MediumLevelILOperation
+from z3 import And, Bool, Tactic, simplify
+
+from binaryninja import (
+    MediumLevelILBasicBlock,
+    MediumLevelILInstruction,
+    MediumLevelILOperation,
+    log_debug,
+)
 
 from . import mlil_ast
-from z3 import Bool, simplify, And, Tactic
 
-_true_condition = simplify(Bool('a') == Bool('a'))
+_true_condition = simplify(Bool("a") == Bool("a"))
+
 
 class MediumLevelILAstNode(object):
     def __init__(self, ast: mlil_ast.MediumLevelILAst):
@@ -34,10 +40,12 @@ class MediumLevelILAstNode(object):
     def __lt__(self, other):
         log_debug("MediumLevelILAstNode.__lt__")
         result = (
-            True 
-            if self._ast.reaching_conditions.get((self.block, other.block)) is not None
+            True
+            if self._ast.reaching_conditions.get((self.block, other.block))
+            is not None
             else True
-            if self.start < other.start else False
+            if self.start < other.start
+            else False
         )
         log_debug(f"{self} < {other} == {result}")
         return result
@@ -74,17 +82,17 @@ class MediumLevelILAstNode(object):
         return (
             True
             if self._type == other._type and self.start == other.start
-            else
-            False
+            else False
         )
 
     def __ne__(self, other):
         return not isinstance(other, type(self)) or self.start != other.start
 
+
 class MediumLevelILAstSeqNode(MediumLevelILAstNode):
-    def __init__(self, ast: mlil_ast.MediumLevelILAst, nodes: list=None):
+    def __init__(self, ast: mlil_ast.MediumLevelILAst, nodes: list = None):
         super().__init__(ast)
-        self._type = 'seq'
+        self._type = "seq"
         self._nodes: list = nodes if nodes is not None else []
 
         self.flatten_sequence()
@@ -97,7 +105,7 @@ class MediumLevelILAstSeqNode(MediumLevelILAstNode):
 
         flattened_nodes = []
         for node in self.nodes:
-            if node.type == 'seq':
+            if node.type == "seq":
                 flattened_nodes += node.nodes
             else:
                 flattened_nodes.append(node)
@@ -149,9 +157,16 @@ class MediumLevelILAstSeqNode(MediumLevelILAstNode):
 
 
 class MediumLevelILAstCondNode(MediumLevelILAstNode):
-    def __init__(self, ast: mlil_ast.MediumLevelILAst, condition: Bool, condition_il: MediumLevelILInstruction, true: MediumLevelILAstNode, false: MediumLevelILAstNode=None):
+    def __init__(
+        self,
+        ast: mlil_ast.MediumLevelILAst,
+        condition: Bool,
+        condition_il: MediumLevelILInstruction,
+        true: MediumLevelILAstNode,
+        false: MediumLevelILAstNode = None,
+    ):
         if condition is None:
-            raise NotImplementedError('condition should not be None')
+            raise NotImplementedError("condition should not be None")
         self._condition = condition
         super().__init__(ast)
         self._type = "cond"
@@ -166,9 +181,18 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
         if self[True] is None:
             return
 
-        nodes = [n for n in self[True].nodes if n.type != 'block' or n.block[0].operation not in (MediumLevelILOperation.MLIL_IF, MediumLevelILOperation.MLIL_GOTO)]
+        nodes = [
+            n
+            for n in self[True].nodes
+            if n.type != "block"
+            or n.block[0].operation
+            not in (
+                MediumLevelILOperation.MLIL_IF,
+                MediumLevelILOperation.MLIL_GOTO,
+            )
+        ]
 
-        if any(n.type != 'cond' for n in nodes):
+        if any(n.type != "cond" for n in nodes):
             for node in nodes:
                 log_debug(f"- {node}")
             return
@@ -181,15 +205,16 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
             log_debug(f"+ {node._condition}")
             node._condition = reduce(
                 And,
-                Tactic('ctx-solver-simplify')(And(self._condition, node._condition))[0]
+                Tactic("ctx-solver-simplify")(
+                    And(self._condition, node._condition)
+                )[0],
             )
             log_debug(f"flattened condition: {node._condition}")
             new_conditions.append(node)
 
         self.__class__ = MediumLevelILAstSeqNode
-        self._type = 'seq'
+        self._type = "seq"
         self._nodes = sorted(new_conditions)
-        
 
     @property
     def start(self) -> int:
@@ -214,7 +239,10 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
         return self[True] == other[True]
 
     def __repr__(self):
-        return f"<cond: start={self.start} {self.condition} -> ({self._true} | {self._false})>"
+        return (
+            f"<cond: start={self.start} {self.condition} -> "
+            f"({self._true} | {self._false})>"
+        )
 
     def __hash__(self):
         return hash(self.start)
@@ -231,6 +259,7 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
         else:
             self._false = value
 
+
 class MediumLevelILAstElseNode(MediumLevelILAstNode):
     def __init__(self, ast, address):
         super().__init__(ast)
@@ -240,6 +269,7 @@ class MediumLevelILAstElseNode(MediumLevelILAstNode):
     @property
     def address(self):
         return self._address
+
 
 class MediumLevelILAstBreakNode(MediumLevelILAstNode):
     def __init__(self, ast, start, address):
@@ -257,13 +287,20 @@ class MediumLevelILAstBreakNode(MediumLevelILAstNode):
         return self._start
 
     def __repr__(self):
-        return f'<break: start={self.start} address={self.address:x}>'
+        return f"<break: start={self.start} address={self.address:x}>"
 
     def __iter__(self):
         return iter([])
 
+
 class MediumLevelILAstLoopNode(MediumLevelILAstNode):
-    def __init__(self, ast: mlil_ast.MediumLevelILAst, body: MediumLevelILAstSeqNode, condition=_true_condition, loop_type: str='endless'):
+    def __init__(
+        self,
+        ast: mlil_ast.MediumLevelILAst,
+        body: MediumLevelILAstSeqNode,
+        condition=_true_condition,
+        loop_type: str = "endless",
+    ):
         super().__init__(ast)
         self._body = body
         self._condition = condition
@@ -300,16 +337,19 @@ class MediumLevelILAstLoopNode(MediumLevelILAstNode):
 
     @loop_type.setter
     def loop_type(self, value: str):
-        if value in ('endless', 'while', 'dowhile', 'for'):
+        if value in ("endless", "while", "dowhile", "for"):
             self._loop_type = value
         else:
-            raise ValueError("Type should be 'endless', 'while', 'for', or 'dowhile'.")
+            raise ValueError(
+                "Type should be 'endless', 'while', 'for', or 'dowhile'."
+            )
 
     def __hash__(self):
         return hash(self.start)
 
     def __repr__(self):
         return f"<loop: condition={self.condition} start={self.start}>"
+
 
 class MediumLevelILAstSwitchNode(MediumLevelILAstNode):
     def __init__(self, ast: mlil_ast.MediumLevelILAst, switch, start, address):
@@ -353,7 +393,9 @@ class MediumLevelILAstSwitchNode(MediumLevelILAstNode):
 
 
 class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):
-    def __init__(self, ast: mlil_ast.MediumLevelILAst, bb: MediumLevelILBasicBlock):
+    def __init__(
+        self, ast: mlil_ast.MediumLevelILAst, bb: MediumLevelILBasicBlock
+    ):
         super().__init__(ast)
         self._bb = bb
         self._type = "block"
@@ -373,13 +415,14 @@ class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):
     def __lt__(self, other):
         log_debug("__lt__")
         result = (
-            True 
-            if self._ast.reaching_conditions.get((self.block, other.block)) is not None
+            True
+            if self._ast.reaching_conditions.get((self.block, other.block))
+            is not None
             else False
         )
 
         log_debug(f"{self} < {other} == {result}")
-        return result or (self.start == other.start and other.type == 'cond')
+        return result or (self.start == other.start and other.type == "cond")
 
     def __eq__(self, other):
         if isinstance(other, MediumLevelILBasicBlock):

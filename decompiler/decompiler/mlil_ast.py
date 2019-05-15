@@ -1,28 +1,23 @@
 from __future__ import annotations
 
-from collections import deque
 from functools import cmp_to_key, reduce
-from itertools import product, repeat, chain
+from itertools import product, repeat
 
-from z3 import And, Not, Or, is_true, simplify, Bool, BoolVal, Tactic
+from z3 import And, BoolVal, Not, Or, Tactic, is_true, simplify
 
 from binaryninja import (
     BranchType,
-    ILBranchDependence,
     InstructionTextTokenType,
-    MediumLevelILBasicBlock,
     MediumLevelILFunction,
     MediumLevelILInstruction,
     MediumLevelILOperation,
     PossibleValueSet,
     RegisterValueType,
-    Variable,
-    VariableSourceType,
-    log_debug, log_info
+    log_debug,
+    log_info,
 )
 
 from .condition_visitor import ConditionVisitor
-from .if_else_visitor import IfVisitor
 from .nodes import (
     MediumLevelILAstBasicBlockNode,
     MediumLevelILAstBreakNode,
@@ -33,16 +28,16 @@ from .nodes import (
     MediumLevelILAstSeqNode,
     MediumLevelILAstSwitchNode,
 )
-from .region import Region
 
-_true_condition = simplify(Bool('a') == Bool('a'))
 
 class MediumLevelILAst(object):
     def __init__(self, function: MediumLevelILFunction):
         self._function = function
         self.view = function.source_function.view
         self._nodes = {}
-        self._root = MediumLevelILAstBasicBlockNode(self, function.basic_blocks[0])
+        self._root = MediumLevelILAstBasicBlockNode(
+            self, function.basic_blocks[0]
+        )
         self._regions = {}
         self._reaching_conditions = {}
         self._reaching_constraints = {}
@@ -73,7 +68,8 @@ class MediumLevelILAst(object):
     def root(self, new_root: MediumLevelILAstNode):
         if not isinstance(new_root, MediumLevelILAstNode):
             raise TypeError(
-                f"new_root must be a MediumLevelILAstNode, got {type(new_root)}"
+                "new_root must be a MediumLevelILAstNode, got "
+                f"{type(new_root)}"
             )
         self._root = new_root
 
@@ -129,9 +125,9 @@ class MediumLevelILAst(object):
 
                     if nt == ne and dfs_stack:
                         log_debug("    adding finished slice")
-                        reaching_conditions[(ns, ne)] = reaching_conditions.get(
-                            (ns, ne), list()
-                        )
+                        reaching_conditions[
+                            (ns, ne)
+                        ] = reaching_conditions.get((ns, ne), list())
                         reaching_conditions[(ns, ne)].append(dfs_stack)
 
                 elif (nt, ne) in reaching_conditions and e not in dfs_stack:
@@ -194,7 +190,9 @@ class MediumLevelILAst(object):
 
         regions = self._regions
 
-        bb_queue = sorted(MediumLevelILAstBasicBlockNode(self, b) for b in basic_blocks)
+        bb_queue = sorted(
+            MediumLevelILAstBasicBlockNode(self, b) for b in basic_blocks
+        )
 
         log_debug(f"{bb_queue}")
 
@@ -214,9 +212,9 @@ class MediumLevelILAst(object):
                     switch = bb[-1].dest.possible_values.mapping
                     cases = {
                         next(
-                                b
-                                for b in self._function.basic_blocks
-                                if b.source_block.start == t
+                            b
+                            for b in self._function.basic_blocks
+                            if b.source_block.start == t
                         ): v
                         for v, t in switch.items()
                     }
@@ -228,7 +226,10 @@ class MediumLevelILAst(object):
                         bb[-1].dest, switch.keys()
                     )
                     current_node = MediumLevelILAstSwitchNode(
-                        self, switch_condition, bb[-1].instr_index, bb[-1].address
+                        self,
+                        switch_condition,
+                        bb[-1].instr_index,
+                        bb[-1].address,
                     )
                 else:
                     current_node = MediumLevelILAstSeqNode(self)
@@ -240,12 +241,11 @@ class MediumLevelILAst(object):
                     if (bb, pr) in self.reaching_conditions
                 }
 
-                # TODO: double check this to make sure it's actually removing regions
-                # like it's supposed to
-                # remove any sub regions from our list of regions
                 nodes = [MediumLevelILAstBasicBlockNode(self, bb)]
 
-                regions_in_this_region = {r for r in possible_region if r.block in self._regions}
+                regions_in_this_region = {
+                    r for r in possible_region if r.block in self._regions
+                }
 
                 log_debug(f"regions_in_this_region: {regions_in_this_region}")
 
@@ -254,11 +254,17 @@ class MediumLevelILAst(object):
                 log_debug(f"possible_region: {possible_region}")
 
                 for r in regions_in_this_region:
- 
+
                     r_has_multiple_incoming = len(r.block.incoming_edges) > 1
 
-                    log_debug(f"{r} r_has_multiple_constraints: {r_has_multiple_incoming}")
-                    log_debug(f"{r} bb in r.block.dominators: {bb in r.block.dominators}")
+                    log_debug(
+                        f"{r} r_has_multiple_constraints: "
+                        f"{r_has_multiple_incoming}"
+                    )
+                    log_debug(
+                        f"{r} bb in r.block.dominators: "
+                        f"{bb in r.block.dominators}"
+                    )
 
                     sub_region = regions[r.block]
 
@@ -266,8 +272,10 @@ class MediumLevelILAst(object):
                         del regions[r.block]
 
                         if sub_region.type != "loop":
-                            reaching_constraint = self._reaching_constraints.get(
-                                (bb, r.block)
+                            reaching_constraint = (
+                                self._reaching_constraints.get(
+                                    (bb, r.block)
+                                )
                             )
 
                             if is_true(reaching_constraint):
@@ -282,11 +290,12 @@ class MediumLevelILAst(object):
                                     self,
                                     reaching_constraint,
                                     r.block.incoming_edges[0].source[-1],
-                                    sub_region
+                                    sub_region,
                                 )
 
-                            # otherwise it's just a sequence still. In fact, we can probably
-                            # just bring these into the original region
+                            # otherwise it's just a sequence still. In fact,
+                            # we can probably just bring these into the
+                            # original region
                             else:
                                 new_node = sub_region
                         else:
@@ -302,10 +311,9 @@ class MediumLevelILAst(object):
                                 else:
                                     current_node[cases[r.block]] = new_node
 
-
-                    if sub_region.type == 'seq':
+                    if sub_region.type == "seq":
                         to_remove = sub_region.nodes
-                    elif sub_region.type == 'loop':
+                    elif sub_region.type == "loop":
                         to_remove = sub_region.body.nodes
                     else:
                         raise TypeError(
@@ -316,18 +324,20 @@ class MediumLevelILAst(object):
                     while to_remove:
                         sub = to_remove.pop()
 
-                        if sub.type == 'seq':
+                        if sub.type == "seq":
                             to_remove += sub.nodes
-                        
-                        if sub.type == 'loop':
+
+                        if sub.type == "loop":
                             to_remove += sub.body.nodes
 
-                        if sub.type == 'cond':
+                        if sub.type == "cond":
                             to_remove.append(sub[True])
 
-                        if sub.type == 'block':
+                        if sub.type == "block":
                             if sub in possible_region:
-                                log_debug(f"removing {sub} from possible_region")
+                                log_debug(
+                                    f"removing {sub} from possible_region"
+                                )
                                 possible_region.remove(sub)
 
                 for r in possible_region:
@@ -336,22 +346,20 @@ class MediumLevelILAst(object):
                     if r.block in bb_queue:
                         bb_queue.remove(r.block)
 
-                if current_node.type == 'switch':
+                if current_node.type == "switch":
                     nodes.append(current_node)
                     current_node = MediumLevelILAstSeqNode(self, nodes)
 
                 current_node._nodes = sorted(nodes)
 
-                if current_node.type == 'seq':
+                if current_node.type == "seq":
                     current_node.flatten_sequence()
 
                 new_region = current_node
             else:
                 # Section C.1 in whitepaper: Initial Loop Nodes and Successors
                 latching_nodes = {
-                    e.source
-                    for e in bb.incoming_edges
-                    if e.back_edge
+                    e.source for e in bb.incoming_edges if e.back_edge
                 }
 
                 loop_slice = {
@@ -376,27 +384,28 @@ class MediumLevelILAst(object):
 
                 log_debug(f"original successor_nodes: {successor_nodes}")
 
-                # Section C.2 in whitepaper: Successor Refinement and Loop Membership
-                # TODO: modify this to ensure there is a final successor if one exists,
-                # specifically, we want any return statement to be a successor....maybe?
+                # Section C.2 in whitepaper: Successor Refinement and Loop
+                # Membership
                 while len(successor_nodes) > 1:
                     new = set()
                     old = set()
-                    for successor in sorted(list(successor_nodes), key=lambda i: i.start):
+                    for successor in sorted(
+                        list(successor_nodes), key=lambda i: i.start
+                    ):
                         # add a successor to the loop if both hold true:
-                        # a) the successor is dominated by the start of the loop
+                        # a) the successor is dominated by the start of the
+                        #    loop
                         # b) the successor's immediate predecessors are all in
                         #    the loop.
-                        if (
-                            bb in successor.dominators
-                            and all(
-                                incoming.source in loop_nodes
-                                for incoming in successor.incoming_edges
-                            )
+                        if bb in successor.dominators and all(
+                            incoming.source in loop_nodes
+                            for incoming in successor.incoming_edges
                         ):
                             loop_nodes.add(successor)
                             old.add(successor)
-                            new = new & {e.target for e in successor.outgoing_edges}
+                            new = new & {
+                                e.target for e in successor.outgoing_edges
+                            }
 
                     if old:
                         successor_nodes = successor_nodes - old
@@ -414,7 +423,9 @@ class MediumLevelILAst(object):
                     if r in regions:
                         sub_region = regions[r]
 
-                        reaching_constraint = self._reaching_constraints.get((bb, r))
+                        reaching_constraint = self._reaching_constraints.get(
+                            (bb, r)
+                        )
 
                         if is_true(reaching_constraint):
                             reaching_constraint = None
@@ -426,8 +437,8 @@ class MediumLevelILAst(object):
                                 r[0],
                                 MediumLevelILAstSeqNode(
                                     self,
-                                    [MediumLevelILAstBasicBlockNode(self, r)]
-                                )
+                                    [MediumLevelILAstBasicBlockNode(self, r)],
+                                ),
                             )
                         else:
                             new_node = sub_region
@@ -437,7 +448,9 @@ class MediumLevelILAst(object):
                         if bb == r:
                             continue
 
-                        reaching_constraint = self._reaching_constraints.get((bb, r))
+                        reaching_constraint = self._reaching_constraints.get(
+                            (bb, r)
+                        )
                         if is_true(reaching_constraint):
                             reaching_constraint = None
 
@@ -447,14 +460,13 @@ class MediumLevelILAst(object):
                                 reaching_constraint,
                                 bb[-1],
                                 MediumLevelILAstSeqNode(
-                                    self, 
-                                    [MediumLevelILAstBasicBlockNode(self, r)]
-                                )
+                                    self,
+                                    [MediumLevelILAstBasicBlockNode(self, r)],
+                                ),
                             )
                         else:
                             new_node = MediumLevelILAstSeqNode(
-                                self, 
-                                [MediumLevelILAstBasicBlockNode(self, r)]
+                                self, [MediumLevelILAstBasicBlockNode(self, r)]
                             )
 
                     nodes.add(new_node)
@@ -471,12 +483,14 @@ class MediumLevelILAst(object):
                         successor[0],
                         MediumLevelILAstSeqNode(
                             self,
-                            [MediumLevelILAstBreakNode(
-                                self,
-                                successor.start,
-                                successor.source_block.start
-                            )]
-                        )
+                            [
+                                MediumLevelILAstBreakNode(
+                                    self,
+                                    successor.start,
+                                    successor.source_block.start,
+                                )
+                            ],
+                        ),
                     )
                     nodes.add(break_node)
 
@@ -485,7 +499,8 @@ class MediumLevelILAst(object):
                         del self._regions[successor]
                     else:
                         successor_node = MediumLevelILAstSeqNode(
-                            self, [MediumLevelILAstBasicBlockNode(self, successor)]
+                            self,
+                            [MediumLevelILAstBasicBlockNode(self, successor)],
                         )
 
                     # convert the successor nodes to a chain of
@@ -496,31 +511,19 @@ class MediumLevelILAst(object):
                             self.reaching_constraints.get((bb, successor)),
                             successor.source_block[0],
                             successor_node,
-                            successor_cond
+                            successor_cond,
                         )
 
                 if successor_cond is not None:
                     successor_node = successor_cond
 
-                body = MediumLevelILAstSeqNode(
-                    self,
-                    sorted(list(nodes))
-                )
+                body = MediumLevelILAstSeqNode(self, sorted(list(nodes)))
 
-                loop_node = MediumLevelILAstLoopNode(
-                    self,
-                    body
-                )
+                loop_node = MediumLevelILAstLoopNode(self, body)
 
                 if successor_node is not None:
-                    region_nodes = [
-                        loop_node,
-                        successor_node
-                    ]
-                    new_region = MediumLevelILAstSeqNode(
-                        self,
-                        region_nodes
-                    )
+                    region_nodes = [loop_node, successor_node]
+                    new_region = MediumLevelILAstSeqNode(self, region_nodes)
                 else:
                     new_region = loop_node
 
@@ -567,7 +570,9 @@ class MediumLevelILAst(object):
 
             # If it's InSetOfValues, check to make sure
             # all of the values are in pv.values
-            if all(v in cases for v in pv.values) and len(cases) == len(pv.values):
+            if all(v in cases for v in pv.values) and len(cases) == len(
+                pv.values
+            ):
                 result = current_operand
                 break
             else:
@@ -597,22 +602,24 @@ class MediumLevelILAst(object):
 
             nodes_to_remove = []
 
-            if node.type == 'seq':
+            if node.type == "seq":
                 nodes_to_remove = self.find_if_else_for_node(node, node.nodes)
                 _nodes = node._nodes
 
-            elif node.type == 'loop':
-                nodes_to_remove = self.find_if_else_for_node(node.body, node.body.nodes)
+            elif node.type == "loop":
+                nodes_to_remove = self.find_if_else_for_node(
+                    node.body, node.body.nodes
+                )
                 _nodes = node.body._nodes
 
             for n in nodes_to_remove:
                 _nodes.remove(n) if n in _nodes else None
 
-            if node.type == 'seq':
+            if node.type == "seq":
                 nodes_to_check += node.nodes
-            elif node.type == 'loop':
+            elif node.type == "loop":
                 nodes_to_check += node.body.nodes
-            elif node.type == 'cond':
+            elif node.type == "cond":
                 nodes_to_check.append(node[True]) if node[True] else None
                 nodes_to_check.append(node[False]) if node[False] else None
 
@@ -625,13 +632,13 @@ class MediumLevelILAst(object):
         while nodes_to_check:
             ni = nodes_to_check.pop()
 
-            if ni.type != 'cond':
+            if ni.type != "cond":
                 continue
 
             log_debug(f"checking {ni}")
 
             for nj in nodes_to_check:
-                if nj.type != 'cond':
+                if nj.type != "cond":
                     continue
 
                 if ni == nj:
@@ -640,17 +647,20 @@ class MediumLevelILAst(object):
                 log_debug(f"checking against {nj}")
 
                 if self.try_make_simple_if_else(
-                        ni, nj, nodes_to_check, nodes_to_remove):
+                    ni, nj, nodes_to_check, nodes_to_remove
+                ):
                     break
 
                 if self.try_make_complex_if_else(
-                        parent, ni, nj, nodes_to_check, nodes_to_remove):
+                    parent, ni, nj, nodes_to_check, nodes_to_remove
+                ):
                     break
 
         return nodes_to_remove
 
     def try_make_simple_if_else(
-            self, node1, node2, nodes_to_check, nodes_to_remove):
+        self, node1, node2, nodes_to_check, nodes_to_remove
+    ):
         cond1 = node1.condition
         cond2 = node2.condition
 
@@ -663,13 +673,14 @@ class MediumLevelILAst(object):
             else:
                 node1[False] = node2[True]
                 nodes_to_remove.append(node2)
-            
+
             return True
 
         return False
 
     def try_make_complex_if_else(
-            self, parent, node1, node2, nodes_to_check, nodes_to_remove):
+        self, parent, node1, node2, nodes_to_check, nodes_to_remove
+    ):
         log_debug("try_make_complex_if_else")
         cond1 = node1.condition
         cond2 = node2.condition
@@ -684,7 +695,7 @@ class MediumLevelILAst(object):
 
             # If the top level operation is not an And, we don't need
             # to go any further.
-            if current_cond.decl().name() != 'and':
+            if current_cond.decl().name() != "and":
                 log_debug(f"current_cond is {current_cond}")
                 return False
 
@@ -692,30 +703,30 @@ class MediumLevelILAst(object):
             c = current_cond.arg(0)
             R = simplify(And(current_cond.arg(1), right_side))
             log_debug(f"c: {c} R: {R} cond2: {cond2}")
-            if not Tactic('ctx-solver-simplify')(And(Not(c), R) == cond2)[0]:
-                log_debug(f"Found complex if/else (0-1)! {R} and {c} | {cond2}")
+            if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
+                log_debug(
+                    f"Found complex if/else (0-1)! {R} and {c} | {cond2}"
+                )
                 break
 
             # try again, but the other way
             c = current_cond.arg(1)
             R = simplify(And(current_cond.arg(0), right_side))
             log_debug(f"c: {c} R: {R} cond2: {cond2}")
-            if not Tactic('ctx-solver-simplify')(And(Not(c), R) == cond2)[0]:
-                log_debug(f"Found complex if/else (1-0)! {R} and {c} | {cond2}")
+            if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
+                log_debug(
+                    f"Found complex if/else (1-0)! {R} and {c} | {cond2}"
+                )
                 break
 
             to_visit = [
                 (current_cond.arg(0), current_cond.arg(1)),
-                (current_cond.arg(1), current_cond.arg(0))
+                (current_cond.arg(1), current_cond.arg(0)),
             ]
 
         # if we get here, we have a complex if/else
         new_if_else_node = MediumLevelILAstCondNode(
-            self,
-            c,
-            node1._condition_il,
-            node1[True],
-            node2[True]
+            self, c, node1._condition_il, node1[True], node2[True]
         )
 
         log_debug(f"R is currently {R}")
@@ -724,10 +735,7 @@ class MediumLevelILAst(object):
             self,
             simplify(R),
             node1._condition_il,
-            MediumLevelILAstSeqNode(
-                self,
-                [new_if_else_node]
-            )
+            MediumLevelILAstSeqNode(self, [new_if_else_node]),
         )
 
         log_debug(f"{new_cond_node}")
@@ -741,7 +749,10 @@ class MediumLevelILAst(object):
     def generate_reaching_constraints(self):
         visitor = ConditionVisitor()
 
-        for (start, end), reaching_condition in self.reaching_conditions.items():
+        for (
+            (start, end),
+            reaching_condition,
+        ) in self.reaching_conditions.items():
             or_exprs = []
 
             for condition in reaching_condition:
@@ -752,11 +763,17 @@ class MediumLevelILAst(object):
                         continue
 
                     if edge.type == BranchType.TrueBranch:
-                        and_exprs.append(visitor.simplify(edge.source[-1].condition))
+                        and_exprs.append(
+                            visitor.simplify(edge.source[-1].condition)
+                        )
 
                     elif edge.type == BranchType.FalseBranch:
                         and_exprs.append(
-                            simplify(Not(visitor.simplify(edge.source[-1].condition)))
+                            simplify(
+                                Not(
+                                    visitor.simplify(edge.source[-1].condition)
+                                )
+                            )
                         )
 
                 if and_exprs:
@@ -775,20 +792,20 @@ class MediumLevelILAst(object):
         while to_visit:
             node = to_visit.pop()
 
-            if node.type == 'block':
+            if node.type == "block":
                 continue
 
             if node in visited:
                 log_debug(f"wtf, why have I visited {node} already")
                 break
 
-            if node.type == 'seq':
+            if node.type == "seq":
                 to_visit += [n for n in node.nodes if n is not None]
-            elif node.type == 'cond':
+            elif node.type == "cond":
                 to_visit += node[True].nodes if node[True] else []
                 to_visit += node[False].nodes if node[False] else []
 
-            if node.type == 'loop':
+            if node.type == "loop":
                 log_debug(f"{node}")
 
                 while_condition = self._check_while(node)
@@ -797,9 +814,9 @@ class MediumLevelILAst(object):
                     node.loop_type = "while"
                     node.condition = reduce(
                         And,
-                        Tactic('ctx-solver-simplify')(Not(while_condition))[0]
+                        Tactic("ctx-solver-simplify")(Not(while_condition))[0],
                     )
-                    
+
                     break_cond = node.body.nodes[0]
 
                     if break_cond[False] is not None:
@@ -810,7 +827,9 @@ class MediumLevelILAst(object):
                     for idx, child in enumerate(node.body.nodes):
                         if (
                             isinstance(child, MediumLevelILAstCondNode)
-                            and is_true(simplify(child.condition == node.condition))
+                            and is_true(
+                                simplify(child.condition == node.condition)
+                            )
                             and child[False] is None
                         ):
                             node.body._nodes[idx] = child[True]
@@ -822,9 +841,11 @@ class MediumLevelILAst(object):
                     node.loop_type = "dowhile"
                     node.condition = reduce(
                         And,
-                        Tactic('ctx-solver-simplify')(Not(dowhile_condition))[0]
+                        Tactic("ctx-solver-simplify")(Not(dowhile_condition))[
+                            0
+                        ],
                     )
-                    
+
                     break_cond = node.body.nodes[-1]
 
                     if break_cond[False] is not None:
@@ -837,7 +858,9 @@ class MediumLevelILAst(object):
                     for idx, child in enumerate(node.body.nodes):
                         if (
                             isinstance(child, MediumLevelILAstCondNode)
-                            and is_true(simplify(child.condition == node.condition))
+                            and is_true(
+                                simplify(child.condition == node.condition)
+                            )
                             and child[False] is None
                         ):
                             node.body._nodes[idx] = child[True]
@@ -848,7 +871,7 @@ class MediumLevelILAst(object):
             log_debug(loop_node.loop_type)
             return None
 
-        if loop_node.body.nodes[0].type != 'cond':
+        if loop_node.body.nodes[0].type != "cond":
             log_debug(f"{loop_node.body.nodes[0].type}")
             return None
 
@@ -869,7 +892,7 @@ class MediumLevelILAst(object):
             log_debug(loop_node.loop_type)
             return None
 
-        if loop_node.body.nodes[-1].type != 'cond':
+        if loop_node.body.nodes[-1].type != "cond":
             log_debug(f"{loop_node.body.nodes[-1].type}")
             return None
 
@@ -909,14 +932,19 @@ class MediumLevelILAst(object):
                     indent += 4
 
                 for il in node.header:
-                    if (il.instr_index == node.header.end - 1) and il.operation not in (
+                    if (
+                        il.instr_index == node.header.end - 1
+                    ) and il.operation not in (
                         MediumLevelILOperation.MLIL_RET,
                         MediumLevelILOperation.MLIL_RET_HINT,
                     ):
                         continue
                     tokens = ""
                     for t in il.tokens:
-                        if t.type != InstructionTextTokenType.PossibleAddressToken:
+                        if (
+                            t.type
+                            != InstructionTextTokenType.PossibleAddressToken
+                        ):
                             tokens += t.text
                         elif self.view.get_symbols(t.value, 1):
                             tokens += self.view.get_symbols(t.value, 1)[0].name

@@ -1,5 +1,6 @@
 from binaryninja import log_debug
 
+
 class BNILVisitor(object):
     def __init__(self, **kw):
         super(BNILVisitor, self).__init__()

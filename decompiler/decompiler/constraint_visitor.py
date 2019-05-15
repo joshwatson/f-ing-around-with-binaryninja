@@ -1,16 +1,14 @@
-from z3 import BitVecNumRef, BitVecRef, Bool, Not
+from binaryninja import (
+    Function,
+    InstructionTextToken,
+    InstructionTextTokenType,
+    TypeClass,
+    VariableSourceType,
+    log_debug,
+)
 
-from binaryninja import (Function, InstructionTextToken,
-                         InstructionTextTokenType, TypeClass,
-                         VariableSourceType, log_debug)
+negations = {"<=": ">", "==": "!=", ">": "<=", ">=": "<", "<": ">="}
 
-negations = {
-    '<=': '>',
-    '==': '!=',
-    '>': '<=',
-    '>=': '<',
-    '<': '>='
-}
 
 class ConstraintVisitor:
     def __init__(self, function: Function):
@@ -22,7 +20,7 @@ class ConstraintVisitor:
         if hasattr(self, method_name):
             value = getattr(self, method_name)(expression)
         else:
-            log_debug(f'visit_{method_name} missing')
+            log_debug(f"visit_{method_name} missing")
             value = None
         return value
 
@@ -45,29 +43,31 @@ class ConstraintVisitor:
                             InstructionTextTokenType.TextToken,
                             "("
                         )
-                    ] if expr.decl().name() in ('and', 'or') else []
-                ) +
-                left + 
-                [
+                    ]
+                    if expr.decl().name() in ("and", "or")
+                    else []
+                )
+                + left
+                + [
                     InstructionTextToken(
-                        InstructionTextTokenType.TextToken,
-                        f" {operation} "
+                        InstructionTextTokenType.TextToken, f" {operation} "
                     )
-                ] +
-                right +
-                (
+                ]
+                + right
+                + (
                     [
                         InstructionTextToken(
                             InstructionTextTokenType.TextToken,
                             ")"
                         )
-                    ] if expr.decl().name() in ('and', 'or') else []
+                    ]
+                    if expr.decl().name() in ("and", "or")
+                    else []
                 )
             )
 
-
         elif expr.num_args() == 1:
-            if expr.decl().name() == 'not':
+            if expr.decl().name() == "not":
                 self._in_not = True
             arg = self.visit(expr.arg(0))
             result = (
@@ -75,18 +75,22 @@ class ConstraintVisitor:
                     [
                         InstructionTextToken(
                             InstructionTextTokenType.TextToken,
-                            f"!("
+                            "!("
                         )
-                    ] if not self._in_not else []
-                )+
-                arg +
-                (
+                    ]
+                    if not self._in_not
+                    else []
+                )
+                + arg
+                + (
                     [
                         InstructionTextToken(
                             InstructionTextTokenType.TextToken,
                             ")"
                         )
-                    ] if not self._in_not else []
+                    ]
+                    if not self._in_not
+                    else []
                 )
             )
 
@@ -98,7 +102,7 @@ class ConstraintVisitor:
                 InstructionTextToken(
                     InstructionTextTokenType.IntegerToken,
                     f"{expr.decl().name()}",
-                    value=1 if expr.decl().name() == 'true' else 0
+                    value=1 if expr.decl().name() == "true" else 0,
                 )
             ]
 
@@ -108,54 +112,50 @@ class ConstraintVisitor:
                 InstructionTextTokenType.IntegerToken,
                 str(expr.as_long()),
                 expr.as_long(),
-                size=expr.size() // 8
+                size=expr.size() // 8,
             )
         ]
 
     def visit_BitVecRef(self, expr):
         member = None
-        if expr.decl().name() == 'extract':
+        if expr.decl().name() == "extract":
             end, start = expr.params()
             size = (end - start + 1) // 8
             var_name = expr.arg(0).decl().name()
 
             var = next(
-                (
-                    v
-                    for v in self._function.vars
-                    if v.name == var_name
-                ),
+                (v for v in self._function.vars if v.name == var_name),
                 0
             )
 
             type_ = var.type
 
             if type_.type_class == TypeClass.NamedTypeReferenceClass:
-                type_ = self._function.view.types[type_.named_type_reference.name]
+                type_ = self._function.view.types[
+                    type_.named_type_reference.name
+                ]
 
             if type_.type_class == TypeClass.StructureTypeClass:
                 member = next(
-                    (
-                        m
-                        for m in var.structure.members
-                        if m.offset == start
-                    ),
+                    (m for m in var.structure.members if m.offset == start),
                     None
                 )
                 member_name = member.name
 
-            elif var.source_type == VariableSourceType.RegisterVariableSourceType:
+            elif (var.source_type ==
+                    VariableSourceType.RegisterVariableSourceType):
                 member = next(
                     (
                         subregister
                         for subregister in self._function.arch.regs.values()
                         if (
-                            subregister.full_width_reg == self._function.arch.get_reg_name(var.storage) and
-                            subregister.size == size and
-                            subregister.offset == start
+                            subregister.full_width_reg
+                            == self._function.arch.get_reg_name(var.storage)
+                            and subregister.size == size
+                            and subregister.offset == start
                         )
                     ),
-                    None
+                    None,
                 )
                 member_name = self._function.arch.get_reg_name(member.index)
 
@@ -163,7 +163,7 @@ class ConstraintVisitor:
                 # TODO: Convert the extract into (blah) & ~((1<<start)-1)
                 log_debug(f"member is None {expr!r}")
 
-        elif expr.decl().name().startswith('mem('):
+        elif expr.decl().name().startswith("mem("):
             log_debug(f"{expr}")
             return []
 
@@ -177,27 +177,21 @@ class ConstraintVisitor:
                 None
             )
 
-
-        return (
+        return [
+            InstructionTextToken(
+                InstructionTextTokenType.LocalVariableToken,
+                var.name,
+                var.identifier
+            )
+        ] + (
             [
+                InstructionTextToken(InstructionTextTokenType.TextToken, "."),
                 InstructionTextToken(
-                    InstructionTextTokenType.LocalVariableToken,
-                    var.name,
+                    InstructionTextTokenType.RegisterToken,
+                    member_name,
                     var.identifier
-                )
-            ] + 
-            (
-                [
-                    InstructionTextToken(
-                        InstructionTextTokenType.TextToken,
-                        "."
-                    ),
-                    InstructionTextToken(
-                        InstructionTextTokenType.RegisterToken,
-                        member_name,
-                        var.identifier
-                    )
-                ] if member is not None else []
-            ) 
+                ),
+            ]
+            if member is not None
+            else []
         )
-

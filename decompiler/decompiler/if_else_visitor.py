@@ -1,5 +1,6 @@
 from .bnilvisitor import BNILVisitor
 
+
 class IfVisitor(BNILVisitor):
     def __init__(self, original_condition):
         self.to_visit = original_condition
@@ -20,7 +21,7 @@ class IfVisitor(BNILVisitor):
 
         if left is not None:
             return left[0], expr.right
-        
+
         if right is not None:
             return right[0], expr.left
 
@@ -46,6 +47,7 @@ class IfVisitor(BNILVisitor):
 
     def visit_MLIL_CONST(self, expr):
         return expr.expr_index, None
+
 
 class ElseVisitor(BNILVisitor):
     def __init__(self, expr_to_find):

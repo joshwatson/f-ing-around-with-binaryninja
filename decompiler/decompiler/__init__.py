@@ -1,6 +1,4 @@
-__all__ = ['linear_mlil']
-
-from . import mlil_ast
+__all__ = ["linear_mlil"]
 
 try:
     from binaryninjaui import ViewType
