@@ -106,3 +106,4 @@ venv.bak/
 # Other stuff
 .DS_Store
 .vscode
+ignored
