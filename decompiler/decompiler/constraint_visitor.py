@@ -5,9 +5,27 @@ from binaryninja import (
     TypeClass,
     VariableSourceType,
     log_debug,
+    log_info
 )
 
-negations = {"<=": ">", "==": "!=", ">": "<=", ">=": "<", "<": ">="}
+negations = {
+    "<=": ">",
+    "==": "!=",
+    ">": "<=",
+    ">=": "<",
+    "<": ">=",
+    "u<=": "u>",
+    "u>": "u<=",
+    "u>=": "u<",
+    "u<": "u>="
+}
+
+unsigned_ops = {
+    'ULE': 'u<=',
+    'ULT': 'u<',
+    'UGE': 'u>=',
+    'UGT': 'u>'
+}
 
 
 class ConstraintVisitor:
@@ -20,19 +38,24 @@ class ConstraintVisitor:
         if hasattr(self, method_name):
             value = getattr(self, method_name)(expression)
         else:
-            log_debug(f"visit_{method_name} missing")
+            log_info(f"visit_{method_name} missing")
             value = None
         return value
 
     def visit_BoolRef(self, expr):
         if expr.num_args() == 2:
+            orig_operation = f'{expr.decl()!s}'
+            if orig_operation.startswith('U'):
+                orig_operation = unsigned_ops[orig_operation]
+
             if self._in_not:
-                operation = negations.get(f"{expr.decl()!s}")
+                operation = negations.get(orig_operation)
                 if operation is None:
-                    operation = f"{expr.decl()!s}"
+                    operation = orig_operation
                     self._in_not = False
             else:
-                operation = f"{expr.decl()!s}"
+                operation = orig_operation
+
             left = self.visit(expr.arg(0))
             right = self.visit(expr.arg(1))
 
@@ -97,6 +120,32 @@ class ConstraintVisitor:
             self._in_not = False
             return result
 
+        elif expr.num_args() > 2:
+            result = [
+                InstructionTextToken(
+                    InstructionTextTokenType.TextToken,
+                    "("
+                )
+            ]
+            for arg in range(expr.num_args()):
+                result += self.visit(expr.arg(arg))
+                if arg < expr.num_args() - 1:
+                    result.append(
+                        InstructionTextToken(
+                            InstructionTextTokenType.TextToken,
+                            f" {expr.decl()!s} "
+                        )
+                    )
+
+            result.append(
+                InstructionTextToken(
+                    InstructionTextTokenType.TextToken,
+                    ")"
+                )
+            )
+
+            return result
+
         else:
             return [
                 InstructionTextToken(
@@ -118,6 +167,23 @@ class ConstraintVisitor:
 
     def visit_BitVecRef(self, expr):
         member = None
+        var = None
+
+        if expr.decl().name() == 'bvadd':
+            left = self.visit(expr.arg(0))
+            right = self.visit(expr.arg(1))
+
+            return (
+                left +
+                [
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                        ' + '
+                    )
+                ] +
+                right
+            )
+
         if expr.decl().name() == "extract":
             end, start = expr.params()
             size = (end - start + 1) // 8
@@ -127,6 +193,9 @@ class ConstraintVisitor:
                 (v for v in self._function.vars if v.name == var_name),
                 0
             )
+
+            if var == 0:
+                return self.visit(expr.arg(0))
 
             type_ = var.type
 
@@ -157,33 +226,136 @@ class ConstraintVisitor:
                     ),
                     None,
                 )
-                member_name = self._function.arch.get_reg_name(member.index)
+
+                if member is not None:
+                    member_name = self._function.arch.get_reg_name(
+                        member.index
+                    )
 
             if member is None:
-                # TODO: Convert the extract into (blah) & ~((1<<start)-1)
-                log_debug(f"member is None {expr!r}")
+                mask = ((1 << (end+1)) - 1) ^ ((1 << (start)) - 1)
 
-        elif expr.decl().name().startswith("mem("):
-            log_debug(f"{expr}")
-            return []
+                return [
+                    InstructionTextToken(
+                        InstructionTextTokenType.LocalVariableToken,
+                        var.name,
+                        var.identifier
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                        ' & '
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.IntegerToken,
+                        hex(mask),
+                        mask
+                    )
+                ]
+
+        elif expr.decl().name() == 'select':
+            log_debug(f"{expr.arg(0)}[{expr.arg(1)}]")
+            return (
+                [
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                        '*('
+                    )
+                ] + self.visit(expr.arg(1)) +
+                [
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                        ')'
+                    )
+                ]
+            )
+
+        elif expr.decl().name() == 'concat':
+            log_debug(f'{expr.num_args()}')
+
+            if expr.num_args() > 2:
+                raise NotImplementedError(
+                    f"I don't know how to handle this: {expr}"
+                )
+
+            left, right = expr.arg(0), expr.arg(1)
+
+            max_size = expr.size()
+
+            shift = right.size()
+
+            left_size = left.size()
+
+            end, start = left.params()
+
+            if left_size + shift != max_size:
+                raise NotImplementedError(
+                    (
+                        f'This should never happen! '
+                        f'{left_size} + {shift} != {max_size}'
+                    )
+                )
+
+            if start != 0:
+                left_tokens = self.visit(left)
+            else:
+                left_tokens = self.visit(left.arg(0))
+
+            return (
+                left_tokens +
+                [
+                    InstructionTextToken(
+                        InstructionTextTokenType.TextToken,
+                        ' << '
+                    ),
+                    InstructionTextToken(
+                        InstructionTextTokenType.IntegerToken,
+                        str(shift),
+                        shift
+                    )
+                ]
+            )
 
         else:
+            var_name = expr.decl().name()
+            if var_name[0] == '&':
+                var_name = var_name[1:]
             var = next(
                 (
                     v
                     for v in self._function.vars
-                    if v.name == expr.decl().name()
+                    if v.name == var_name
                 ),
                 None
             )
 
-        return [
-            InstructionTextToken(
-                InstructionTextTokenType.LocalVariableToken,
-                var.name,
-                var.identifier
-            )
-        ] + (
+        if var is None:
+            log_debug(f"var is None: {expr.decl().name()}")
+
+            return [
+                InstructionTextToken(
+                    InstructionTextTokenType.TextToken,
+                    '<Unknown token>'
+                )
+            ]
+
+        return (
+            [
+                InstructionTextToken(
+                    InstructionTextTokenType.TextToken,
+                    '&'
+                )
+            ]
+            if expr.decl().name()[0] == '&'
+            else []
+        ) + (
+            [
+                InstructionTextToken(
+                    InstructionTextTokenType.LocalVariableToken,
+                    var.name,
+                    var.identifier
+                )
+            ]
+        ) + (
             [
                 InstructionTextToken(InstructionTextTokenType.TextToken, "."),
                 InstructionTextToken(

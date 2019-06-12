@@ -8,6 +8,7 @@ from z3 import And, BoolVal, Not, Or, Tactic, is_true, simplify
 from binaryninja import (
     BranchType,
     InstructionTextTokenType,
+    MediumLevelILBasicBlock,
     MediumLevelILFunction,
     MediumLevelILInstruction,
     MediumLevelILOperation,
@@ -21,6 +22,7 @@ from .condition_visitor import ConditionVisitor
 from .nodes import (
     MediumLevelILAstBasicBlockNode,
     MediumLevelILAstBreakNode,
+    MediumLevelILAstCaseNode,
     MediumLevelILAstCondNode,
     MediumLevelILAstElseNode,
     MediumLevelILAstLoopNode,
@@ -28,6 +30,39 @@ from .nodes import (
     MediumLevelILAstSeqNode,
     MediumLevelILAstSwitchNode,
 )
+
+
+def region_sort(nodes):
+    log_debug("region_sort")
+    log_debug(f"initial: {nodes}")
+    sorted_region = {}
+    for i in range(len(nodes)):
+        for j in range(len(nodes)):
+            if i == j:
+                continue
+            if nodes[i] < nodes[j]:
+                sorted_region[i] = sorted_region.get(i, list())
+                sorted_region[i].append(j)
+
+    log_debug(f"sorted_region: {sorted_region}")
+
+    new_order = []
+    added = set()
+    for i in range(len(nodes)):
+        for node in (k for k in sorted_region if i in sorted_region[k]):
+            if node in added:
+                continue
+            added.add(node)
+            new_order.append(nodes[node])
+            log_debug(f"current: {new_order}")
+        if i not in added:
+            added.add(i)
+            new_order.append(nodes[i])
+        log_debug(f"current: {new_order}")
+
+    log_debug(f"new_order: {new_order}")
+
+    return new_order
 
 
 class MediumLevelILAst(object):
@@ -93,8 +128,11 @@ class MediumLevelILAst(object):
         return dict(self._nodes)
 
     def calculate_reaching_conditions(self):
+        # TODO: add temporary node such that no_return nodes
+        # think that they drop into the next region
         reaching_conditions = {}
 
+        # TODO: sort based on whether the basic blocks have incoming edges
         for ns, ne in product(reversed(self._function.basic_blocks), repeat=2):
             if ns == ne:
                 continue
@@ -109,12 +147,15 @@ class MediumLevelILAst(object):
             while edges:
                 e = edges.pop()
 
-                log_debug(f"    {e.source} -> {e.target}")
+                log_debug(f"    {e.type} {e.source} -> {e.target}")
 
                 nt = e.target
 
                 if e.back_edge:
                     visited_edges.add(e)
+
+                if e in visited_edges:
+                    log_debug(f"    edge in visited_edges")
 
                 elif e not in visited_edges and nt not in visited_nodes:
                     log_debug(f"    adding edge to edges")
@@ -131,6 +172,8 @@ class MediumLevelILAst(object):
                         reaching_conditions[(ns, ne)].append(dfs_stack)
 
                 elif (nt, ne) in reaching_conditions and e not in dfs_stack:
+                    # TODO: Simple paths don't exist sometimes when the
+                    # nt -> ne hasn't been visited yet
                     log_debug("    hit simple path, adding finished slice")
                     reaching_conditions[(ns, ne)] = reaching_conditions.get(
                         (ns, ne), list()
@@ -185,13 +228,17 @@ class MediumLevelILAst(object):
         # # step 7: refine loops
         self._refine_loops()
 
+        log_info(f"{self.regions}")
+
+        log_debug("finished with AST")
+
     def _find_regions(self):
         basic_blocks = self._function.basic_blocks
 
         regions = self._regions
 
-        bb_queue = sorted(
-            MediumLevelILAstBasicBlockNode(self, b) for b in basic_blocks
+        bb_queue = region_sort(
+            list(MediumLevelILAstBasicBlockNode(self, b) for b in basic_blocks)
         )
 
         log_debug(f"{bb_queue}")
@@ -205,31 +252,31 @@ class MediumLevelILAst(object):
                     continue
 
                 current_node = None
+                cases = {}
 
                 log_debug(f"creating region for {bb.start}")
 
                 if bb[-1].operation == MediumLevelILOperation.MLIL_JUMP_TO:
                     switch = bb[-1].dest.possible_values.mapping
-                    cases = {
-                        next(
+
+                    # TODO: change how cases are sorted based on fall throughs
+                    for case, block in switch.items():
+                        log_info(f"{case}, {block:x}")
+                        il_block = next(
                             b
                             for b in self._function.basic_blocks
-                            if b.source_block.start == t
-                        ): v
-                        for v, t in switch.items()
-                    }
+                            if b.source_block.start == block
+                        )
+                        cases[il_block] = cases.get(il_block, list())
 
-                    log_info(f"{cases}")
+                        cases[il_block].append(case)
 
                     # TODO: figure out fall through cases
                     switch_condition = self._find_switch_condition(
                         bb[-1].dest, switch.keys()
                     )
                     current_node = MediumLevelILAstSwitchNode(
-                        self,
-                        switch_condition,
-                        bb[-1].instr_index,
-                        bb[-1].address,
+                        self, switch_condition, bb[-1]
                     )
                 else:
                     current_node = MediumLevelILAstSeqNode(self)
@@ -254,7 +301,6 @@ class MediumLevelILAst(object):
                 log_debug(f"possible_region: {possible_region}")
 
                 for r in regions_in_this_region:
-
                     r_has_multiple_incoming = len(r.block.incoming_edges) > 1
 
                     log_debug(
@@ -268,77 +314,16 @@ class MediumLevelILAst(object):
 
                     sub_region = regions[r.block]
 
-                    if not r_has_multiple_incoming or bb in r.block.dominators:
+                    if (
+                        r.block in cases or not r_has_multiple_incoming
+                    ) or bb in r.block.dominators:
                         del regions[r.block]
 
-                        if sub_region.type != "loop":
-                            reaching_constraint = (
-                                self._reaching_constraints.get(
-                                    (bb, r.block)
-                                )
-                            )
-
-                            if is_true(reaching_constraint):
-                                reaching_constraint = None
-
-                            # This is now a condition if:
-                            # a) a reaching constraint exists and
-                            # b) at least one other region can't reach it?
-                            # TODO: make sure b is actually correct
-                            if reaching_constraint is not None:
-                                new_node = MediumLevelILAstCondNode(
-                                    self,
-                                    reaching_constraint,
-                                    r.block.incoming_edges[0].source[-1],
-                                    sub_region,
-                                )
-
-                            # otherwise it's just a sequence still. In fact,
-                            # we can probably just bring these into the
-                            # original region
-                            else:
-                                new_node = sub_region
-                        else:
-                            # loops are just loops still
-                            new_node = sub_region
-
-                        if new_node is not None:
-                            if current_node.type != "switch":
-                                nodes.append(new_node)
-                            else:
-                                if r.block not in cases:
-                                    regions[r.block] = new_node
-                                else:
-                                    current_node[cases[r.block]] = new_node
-
-                    if sub_region.type == "seq":
-                        to_remove = sub_region.nodes
-                    elif sub_region.type == "loop":
-                        to_remove = sub_region.body.nodes
-                    else:
-                        raise TypeError(
-                            "I don't know why I got a "
-                            f"{type(sub_region)} for a sub_region"
+                        self.create_new_node_from_region(
+                            bb, r.block, sub_region, current_node, cases, nodes
                         )
 
-                    while to_remove:
-                        sub = to_remove.pop()
-
-                        if sub.type == "seq":
-                            to_remove += sub.nodes
-
-                        if sub.type == "loop":
-                            to_remove += sub.body.nodes
-
-                        if sub.type == "cond":
-                            to_remove.append(sub[True])
-
-                        if sub.type == "block":
-                            if sub in possible_region:
-                                log_debug(
-                                    f"removing {sub} from possible_region"
-                                )
-                                possible_region.remove(sub)
+                    self.remove_sub_region_nodes(sub_region, possible_region)
 
                 for r in possible_region:
                     log_debug(f"Adding {r} to {bb.start}'s region")
@@ -347,6 +332,26 @@ class MediumLevelILAst(object):
                         bb_queue.remove(r.block)
 
                 if current_node.type == "switch":
+                    current_node._cases = region_sort(current_node._cases)
+
+                    for case in current_node._cases:
+                        # if there are no reaching conditions, then
+                        # this doesn't fall through. Insert a break node.
+                        if all(
+                            self.reaching_conditions.get(
+                                (case.block, other.block)
+                            )
+                            is None
+                            for other in current_node._cases
+                        ):
+                            case.append(
+                                MediumLevelILAstBreakNode(
+                                    self,
+                                    case.nodes[-1].start,
+                                    case.nodes[-1].address,
+                                )
+                            )
+
                     nodes.append(current_node)
                     current_node = MediumLevelILAstSeqNode(self, nodes)
 
@@ -532,6 +537,82 @@ class MediumLevelILAst(object):
 
         return regions
 
+    def create_new_node_from_region(
+        self,
+        bb: MediumLevelILBasicBlock,
+        block: MediumLevelILBasicBlock,
+        sub_region: MediumLevelILAstNode,
+        current_node: MediumLevelILAstNode,
+        cases: dict,
+        nodes: list,
+    ):
+        reaching_constraint = self._reaching_constraints.get((bb, block))
+
+        if is_true(reaching_constraint):
+            reaching_constraint = None
+
+        if sub_region.type != "loop" and reaching_constraint is not None:
+            # This is now a condition node if a reaching constraint exists
+            new_node = MediumLevelILAstCondNode(
+                self,
+                reaching_constraint,
+                block.incoming_edges[0].source[-1],
+                sub_region,
+            )
+
+        else:
+            new_node = sub_region
+
+        if new_node is not None:
+            if current_node.type != "switch":
+                nodes.append(new_node)
+            else:
+                if block not in cases:
+                    raise KeyError(f"{block} not in cases")
+
+                if current_node.block not in new_node.block.dominators:
+                    case = ["default"]
+                else:
+                    case = cases[block]
+
+                current_node.append(
+                    MediumLevelILAstCaseNode(self, case, [new_node])
+                )
+
+    def remove_sub_region_nodes(self, sub_region, possible_region):
+        if sub_region.type == "seq":
+            to_remove = sub_region.nodes
+        elif sub_region.type == "loop":
+            to_remove = sub_region.body.nodes
+        else:
+            raise TypeError(
+                "I don't know why I got a "
+                f"{type(sub_region)} for a sub_region"
+            )
+
+        while to_remove:
+            sub = to_remove.pop()
+
+            if sub.type in ("seq", "case"):
+                to_remove += sub.nodes
+
+            elif sub.type == "loop":
+                to_remove += sub.body.nodes
+
+            elif sub.type == "cond":
+                to_remove.append(sub[True])
+
+            elif sub.type == "block":
+                if sub in possible_region:
+                    log_debug(f"removing {sub} from possible_region")
+                    possible_region.remove(sub)
+
+            elif sub.type == "switch":
+                to_remove += sub.cases
+
+            else:
+                log_info(f"got {sub} while iterating over to_remove")
+
     def _find_switch_condition(self, dest, cases):
         def check_ranges(ranges, cases):
             for r in ranges:
@@ -540,6 +621,9 @@ class MediumLevelILAst(object):
                         return False
 
             return True
+
+        if dest.operation == MediumLevelILOperation.MLIL_VAR:
+            dest = self._function.get_ssa_var_definition(dest.ssa_form.src).src
 
         to_visit = dest.operands
         result = None
@@ -551,8 +635,21 @@ class MediumLevelILAst(object):
             to_visit += current_operand.operands
 
             pv = current_operand.possible_values
+
             if not isinstance(pv, PossibleValueSet):
                 continue
+
+            if pv.type == RegisterValueType.LookupTableValue:
+                if (
+                    current_operand.operation
+                    == MediumLevelILOperation.MLIL_VAR
+                ):
+                    to_visit.append(
+                        self._function.get_ssa_var_definition(
+                            current_operand.ssa_form.src
+                        )
+                    )
+                    continue
 
             if pv.type not in (
                 RegisterValueType.UnsignedRangeValue,
@@ -578,9 +675,11 @@ class MediumLevelILAst(object):
             else:
                 continue
 
-        return ConditionVisitor().simplify(result)
+        return ConditionVisitor(self.view).simplify(result)
 
     def _merge_if_else(self):
+        log_debug("_merge_if_else")
+
         nodes_to_remove = True
 
         while nodes_to_remove:
@@ -625,6 +724,7 @@ class MediumLevelILAst(object):
 
     def find_if_else_for_node(self, parent: MediumLevelILAstNode, nodes: list):
         log_debug(f"find_if_else_for_node")
+
         nodes_to_check = list(nodes)
 
         nodes_to_remove = []
@@ -661,6 +761,9 @@ class MediumLevelILAst(object):
     def try_make_simple_if_else(
         self, node1, node2, nodes_to_check, nodes_to_remove
     ):
+
+        log_debug("try_make_simple_if_else")
+
         cond1 = node1.condition
         cond2 = node2.condition
 
@@ -699,9 +802,17 @@ class MediumLevelILAst(object):
                 log_debug(f"current_cond is {current_cond}")
                 return False
 
+            if current_cond.num_args() < 2:
+                log_debug(f"current_cond: {current_cond}")
+                return False
+
             # try 0 and R first
             c = current_cond.arg(0)
-            R = simplify(And(current_cond.arg(1), right_side))
+            R = And(
+                *Tactic("ctx-solver-simplify")(
+                    And(current_cond.arg(1), right_side)
+                )[0]
+            )
             log_debug(f"c: {c} R: {R} cond2: {cond2}")
             if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
                 log_debug(
@@ -711,7 +822,11 @@ class MediumLevelILAst(object):
 
             # try again, but the other way
             c = current_cond.arg(1)
-            R = simplify(And(current_cond.arg(0), right_side))
+            R = And(
+                *Tactic("ctx-solver-simplify")(
+                    And(current_cond.arg(0), right_side)
+                )[0]
+            )
             log_debug(f"c: {c} R: {R} cond2: {cond2}")
             if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
                 log_debug(
@@ -733,13 +848,15 @@ class MediumLevelILAst(object):
 
         new_cond_node = MediumLevelILAstCondNode(
             self,
-            simplify(R),
+            R,
             node1._condition_il,
             MediumLevelILAstSeqNode(self, [new_if_else_node]),
         )
 
         log_debug(f"{new_cond_node}")
 
+        if node1 not in parent.nodes:
+            log_info(f"{node1} not in {parent.nodes}")
         node1_idx = parent.nodes.index(node1)
 
         parent._nodes[node1_idx] = new_cond_node
@@ -747,7 +864,7 @@ class MediumLevelILAst(object):
         nodes_to_check.remove(node2)
 
     def generate_reaching_constraints(self):
-        visitor = ConditionVisitor()
+        visitor = ConditionVisitor(self.view)
 
         for (
             (start, end),
@@ -763,28 +880,46 @@ class MediumLevelILAst(object):
                         continue
 
                     if edge.type == BranchType.TrueBranch:
-                        and_exprs.append(
-                            visitor.simplify(edge.source[-1].condition)
-                        )
+                        condition = edge.source[-1].condition
+                        if (
+                            condition.operation
+                            == MediumLevelILOperation.MLIL_VAR
+                        ):
+                            condition = self.function.get_ssa_var_definition(
+                                edge.source[-1].ssa_form.condition.src
+                            ).src
+                        and_exprs.append(visitor.simplify(condition))
 
                     elif edge.type == BranchType.FalseBranch:
-                        and_exprs.append(
-                            simplify(
-                                Not(
-                                    visitor.simplify(edge.source[-1].condition)
-                                )
-                            )
-                        )
+                        condition = edge.source[-1].condition
+                        if (
+                            condition.operation
+                            == MediumLevelILOperation.MLIL_VAR
+                        ):
+                            condition = self.function.get_ssa_var_definition(
+                                edge.source[-1].ssa_form.condition.src
+                            ).src
+                        and_exprs += Tactic("ctx-solver-simplify")(
+                            Not(visitor.simplify(condition))
+                        )[0]
 
-                if and_exprs:
-                    or_exprs.append(reduce(And, and_exprs))
+                if and_exprs != []:
+                    or_exprs.append(And(*and_exprs))
 
             if or_exprs:
-                self._reaching_constraints[(start, end)] = simplify(
-                    reduce(Or, or_exprs)
+                or_exprs = Tactic("ctx-solver-simplify")(Or(*or_exprs))[0]
+                reaching_constraint = (
+                    And(*or_exprs)
+                    if len(or_exprs) > 1
+                    else or_exprs[0]
+                    if len(or_exprs)
+                    else BoolVal(True)
                 )
+                self._reaching_constraints[(start, end)] = reaching_constraint
 
     def _refine_loops(self):
+        log_debug("_refine_loops")
+
         to_visit = [r for r in self._regions.values()]
 
         visited = set()

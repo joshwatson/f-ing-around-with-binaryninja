@@ -22,9 +22,16 @@ from itertools import repeat
 
 from z3 import Not
 
-from binaryninja import InstructionTextToken, Settings
+from binaryninja import (
+    BinaryDataNotification,
+    InstructionTextToken,
+    RegisterValueType,
+    Settings,
+    log_debug,
+    Variable,
+)
 from binaryninja.enums import (
-    DisassemblyOption,
+    # DisassemblyOption,
     InstructionTextTokenType,
     LinearDisassemblyLineType,
 )
@@ -45,28 +52,39 @@ from .nodes import MediumLevelILAstElseNode
 _CodeDisassemblyLineType = LinearDisassemblyLineType.CodeDisassemblyLineType
 
 
-class LinearMLILView(TokenizedTextView):
+class LinearMLILView(TokenizedTextView, BinaryDataNotification):
     def __init__(self, parent, data):
         super(LinearMLILView, self).__init__(parent, data)
+        BinaryDataNotification.__init__(self)
         self.data = data
-        self.function = data.entry_function
+
+        self.data.register_notification(self)
+
+        self.function = data.get_recent_function_at(data.offset)
+        if self.function is None:
+            self.function = data.entry_function
+
+        self.function_cache = {}
         if self.function is not None:
             self.setFunction(self.function)
-            self.updateLines()
+        self.updateLines()
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
     def generateLines(self):
         if self.function is None:
             return []
 
+        if self.function in self.function_cache:
+            return self.function_cache[self.function]
+
         mlil = self.function.mlil
 
         # Set up IL display options
         renderer = DisassemblyTextRenderer(mlil)
         # renderer.settings.set_option(DisassemblyOption.ShowAddress)
-        renderer.settings.set_option(
-            DisassemblyOption.ShowVariableTypesWhenAssigned
-        )
+        # renderer.settings.set_option(
+        #     DisassemblyOption.ShowVariableTypesWhenAssigned
+        # )
 
         ast = MediumLevelILAst(mlil)
         ast.generate()
@@ -100,6 +118,42 @@ class LinearMLILView(TokenizedTextView):
                 None,
                 0,
                 DisassemblyTextLine([], self.function.start),
+            )
+        )
+
+        # add variables
+        for var in self.function.vars:
+            var_line = DisassemblyTextLine([], 0)
+
+            var_line.tokens += var.type.get_tokens_before_name()
+            var_line.tokens += [
+                InstructionTextToken(InstructionTextTokenType.TextToken, " "),
+                InstructionTextToken(
+                    InstructionTextTokenType.LocalVariableToken,
+                    var.name,
+                    var.identifier,
+                ),
+                InstructionTextToken(InstructionTextTokenType.TextToken, " "),
+            ]
+            var_line.tokens += var.type.get_tokens_after_name()
+
+            result.append(
+                LinearDisassemblyLine(
+                    LinearDisassemblyLineType.LocalVariableLineType,
+                    self.function,
+                    None,
+                    0,
+                    var_line,
+                )
+            )
+
+        result.append(
+            LinearDisassemblyLine(
+                LinearDisassemblyLineType.LocalVariableListEndLineType,
+                self.function,
+                None,
+                0,
+                DisassemblyTextLine([], 0),
             )
         )
 
@@ -389,47 +443,56 @@ class LinearMLILView(TokenizedTextView):
                 line_index += 1
 
                 to_visit += zip(
-                    reversed(
-                        sorted(current_node.cases.items(), key=lambda i: i[0])
-                    ),
-                    repeat(indent + 4),
+                    reversed(current_node.cases), repeat(indent + 4)
                 )
 
-            elif isinstance(current_node, tuple):
-                il_line = DisassemblyTextLine(
-                    [], current_node[1].header.source_block.start
-                )
+            elif current_node.type == "case":
+                il_line = DisassemblyTextLine([], current_node.address)
 
-                il_line.tokens += [
-                    InstructionTextToken(
-                        InstructionTextTokenType.TextToken, f'{" "*indent}'
-                    ),
-                    InstructionTextToken(
-                        InstructionTextTokenType.OpcodeToken, "case "
-                    ),
-                    InstructionTextToken(
-                        InstructionTextTokenType.IntegerToken,
-                        str(current_node[0]),
-                        current_node[0],
-                    ),
-                    InstructionTextToken(
-                        InstructionTextTokenType.TextToken, " {"
-                    ),
-                ]
+                for idx, v in enumerate(current_node.value):
+                    il_line.tokens += [
+                        InstructionTextToken(
+                            InstructionTextTokenType.TextToken, f'{" "*indent}'
+                        ),
+                        InstructionTextToken(
+                            InstructionTextTokenType.TextToken, "case "
+                        ),
+                        (
+                            InstructionTextToken(
+                                InstructionTextTokenType.IntegerToken,
+                                str(v),
+                                v
+                            ) if v != 'default' else
+                            InstructionTextToken(
+                                InstructionTextTokenType.TextToken, v
+                            )
+                        )
+                    ]
 
-                result.append(
-                    LinearDisassemblyLine(
-                        _CodeDisassemblyLineType,
-                        self.function,
-                        il.il_basic_block,
-                        line_index,
-                        il_line,
+                    if idx == len(current_node.value) - 1:
+                        il_line.tokens.append(
+                            InstructionTextToken(
+                                InstructionTextTokenType.TextToken, " {"
+                            )
+                        )
+
+                    result.append(
+                        LinearDisassemblyLine(
+                            _CodeDisassemblyLineType,
+                            self.function,
+                            il.il_basic_block,
+                            line_index,
+                            il_line,
+                        )
                     )
+
+                    line_index += 1
+
+                    il_line = DisassemblyTextLine([], current_node.address)
+
+                to_visit += zip(
+                    reversed(current_node.nodes), repeat(indent + 4)
                 )
-
-                line_index += 1
-
-                to_visit += [(current_node[1], indent + 4)]
 
             prev_indent = indent
             last_il = il
@@ -465,10 +528,140 @@ class LinearMLILView(TokenizedTextView):
             )
         )
 
+        self.function_cache[self.function] = result
+
+        log_debug("generateLines finished")
+
         return result
 
+    def eliminate_unused_vars(self, lines):
+        log_debug("eliminate_unused_vars")
+
+        lines_to_remove = []
+        instructions_removed = True
+        indices_removed = set()
+        untracked_variables = set()
+
+        while instructions_removed:
+            instructions_removed = False
+
+            for line in lines:
+                if line.type != _CodeDisassemblyLineType:
+                    continue
+
+                contents: DisassemblyTextLine = line.contents
+
+                il = contents.il_instruction
+
+                if il is None:
+                    used_vars = [
+                        Variable.from_identifier(
+                            self.function, t.value
+                        )
+                        for t in contents.tokens
+                        if t.type
+                        == InstructionTextTokenType.LocalVariableToken
+                    ]
+
+                    # no variables? Don't care
+                    if not used_vars:
+                        continue
+
+                    for var in used_vars:
+                        # we'll be conservative and save all definitions
+                        # of a particular Variable since we can't be sure
+                        # of the SSA version here
+                        untracked_variables.update(
+                            set(self.function.mlil.get_var_definitions(var))
+                        )
+
+                    continue
+
+                elif (
+                    il.instr_index in indices_removed or
+                    il.instr_index in untracked_variables
+                ):
+                    # We want to skip this if it's already been removed or
+                    # We know we don't want to remove it
+                    continue
+
+                if il.operation == MediumLevelILOperation.MLIL_SET_VAR:
+                    # does this var have any uses later on? If not, let's
+                    # remove it from the lines
+                    uses = il.function.get_ssa_var_uses(il.ssa_form.dest)
+
+                    if not uses:
+                        lines_to_remove.append(line)
+                        indices_removed.add(il.instr_index)
+                        instructions_removed = True
+                    elif all(
+                        use.instr_index in indices_removed for use in uses
+                    ):
+                        lines_to_remove.append(line)
+                        indices_removed.add(il.instr_index)
+                        instructions_removed = True
+                    else:
+                        for use in uses:
+                            if (
+                                use.operation
+                                == MediumLevelILOperation.MLIL_JUMP_TO
+                            ):
+                                dest_values = use.dest.possible_values
+                                # if this is a jump table of some sort, then we
+                                # can remove it
+                                if dest_values.type in (
+                                    RegisterValueType.InSetOfValues,
+                                    RegisterValueType.LookupTableValue,
+                                    RegisterValueType.NotInSetOfValues,
+                                    RegisterValueType.SignedRangeValue,
+                                    RegisterValueType.UnsignedRangeValue,
+                                ):
+                                    lines_to_remove.append(line)
+                                    indices_removed.add(il.instr_index)
+                                    instructions_removed = True
+
+        for line in lines:
+            if (line.type ==
+                    LinearDisassemblyLineType.LocalVariableLineType):
+                var = next(
+                    Variable.from_identifier(self.function, t.value)
+                    for t in line.contents.tokens
+                    if (t.type ==
+                        InstructionTextTokenType.LocalVariableToken)
+                )
+                defs = self.function.mlil.get_var_definitions(var)
+                if var in self.function.parameter_vars.vars:
+                    continue
+                elif (not defs and
+                        not self.function.mlil.get_var_uses(var)):
+                    lines_to_remove.append(line)
+                elif all(
+                    d in indices_removed
+                    for d in defs
+                ):
+                    lines_to_remove.append(line)
+
+        for line in lines_to_remove:
+            lines.remove(line)
+
+        return lines
+
+    def function_updated(self, view, function):
+        log_debug('function_updated')
+        if function in self.function_cache:
+            del self.function_cache[function]
+
+        # if function == self.function:
+        #     self.updateLines()
+
+    function_update_requested = function_updated
+
     def updateLines(self):
-        self.setUpdatedLines(self.generateLines())
+        log_debug("updateLines")
+        lines = self.generateLines()
+        lines = self.eliminate_unused_vars(lines)
+        self.setUpdatedLines(lines)
+        log_debug("updateLines finished")
 
     def navigate(self, addr):
         # Find correct function based on most recent use

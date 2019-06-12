@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import reduce
 
-from z3 import And, Bool, Tactic, simplify
+from z3 import And, Bool, Tactic, BoolVal
 
 from binaryninja import (
     MediumLevelILBasicBlock,
@@ -13,7 +13,7 @@ from binaryninja import (
 
 from . import mlil_ast
 
-_true_condition = simplify(Bool("a") == Bool("a"))
+_true_condition = BoolVal(True)
 
 
 class MediumLevelILAstNode(object):
@@ -156,6 +156,28 @@ class MediumLevelILAstSeqNode(MediumLevelILAstNode):
         return hash(self.start)
 
 
+class MediumLevelILAstCaseNode(MediumLevelILAstSeqNode):
+    def __init__(
+        self, ast: mlil_ast.MediumLevelILAst, value, nodes: list = None
+    ):
+        super().__init__(ast, nodes)
+        self._value = value
+        self._type = "case"
+
+    @property
+    def value(self):
+        return self._value
+
+    def __lt__(self, other):
+        if self._value == ["default"]:
+            return False
+
+        return super().__lt__(other)
+
+    def __str__(self):
+        return f"<case: {self._value} [{self.nodes}]>"
+
+
 class MediumLevelILAstCondNode(MediumLevelILAstNode):
     def __init__(
         self,
@@ -226,7 +248,7 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
 
     @property
     def block(self) -> MediumLevelILBasicBlock:
-        return self._condition_il.il_basic_block
+        return self[True].block
 
     @property
     def condition(self) -> Bool:
@@ -352,44 +374,56 @@ class MediumLevelILAstLoopNode(MediumLevelILAstNode):
 
 
 class MediumLevelILAstSwitchNode(MediumLevelILAstNode):
-    def __init__(self, ast: mlil_ast.MediumLevelILAst, switch, start, address):
+    def __init__(
+        self,
+        ast: mlil_ast.MediumLevelILAst,
+        switch,
+        il: MediumLevelILInstruction,
+    ):
         self._switch = switch
-        self._cases = {}
+        self._cases = []
         super().__init__(ast)
         self._type = "switch"
-        self._start = start
-        self._address = address
+        self._il = il
+        self._block = il.il_basic_block
+        self._start = il.instr_index
+        self._address = il.address
 
     @property
-    def children(self):
-        return list(self._cases.values())
+    def block(self):
+        return self._block
 
     @property
     def cases(self):
-        return dict(self._cases)
+        return list(self._cases)
 
     @property
     def switch(self):
         return self._switch
 
     @property
+    def il(self):
+        return self._il
+
+    @property
     def start(self):
         return self._start
 
+    @property
     def address(self):
         return self._address
-
-    def __setitem__(self, case, node):
-        self._cases[case] = node
-
-    def __getitem__(self, case):
-        return self._cases[case]
 
     def __repr__(self):
         return f"<switch: start={self.start} {len(self._cases)} cases>"
 
     def __hash__(self):
         return hash(self.start)
+
+    def append(self, node):
+        self._cases.append(node)
+
+    def remove(self, node):
+        self._cases.remove(node)
 
 
 class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):

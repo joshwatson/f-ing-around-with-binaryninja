@@ -1,5 +1,3 @@
-from functools import reduce
-
 from z3 import (
     UGT,
     ULE,
@@ -8,14 +6,13 @@ from z3 import (
     BitVec,
     BitVecSort,
     BoolVal,
-    Concat,
     Extract,
     Not,
     Or,
     Tactic,
 )
 
-from binaryninja import Variable, VariableSourceType
+from binaryninja import BinaryView, Variable, VariableSourceType, log_info
 
 from .bnilvisitor import BNILVisitor
 
@@ -29,20 +26,25 @@ def make_variable(var: Variable):
     return BitVec(var.name, var.type.width * 8)
 
 
-def make_load(src, size):
-    mem = Array("mem", BitVecSort(32), BitVecSort(8))
-
-    load_bytes = [mem[src + i] for i in range(0, size)]
-
-    return Concat(*load_bytes)
-
-
 class ConditionVisitor(BNILVisitor):
+    def __init__(self, view: BinaryView):
+        self.view = view
+        super().__init__()
+        addr_size = self.view.address_size
+        self.mem = {
+            1: Array("mem1", BitVecSort(addr_size*8), BitVecSort(8)),
+            2: Array('mem2', BitVecSort(addr_size*8), BitVecSort(16)),
+            4: Array('mem4', BitVecSort(addr_size*8), BitVecSort(32)),
+            8: Array('mem8', BitVecSort(addr_size*8), BitVecSort(64)),
+            16: Array('mem16', BitVecSort(addr_size*8), BitVecSort(128))
+        }
+
     def simplify(self, condition):
         visit_result = self.visit(condition)
 
         if visit_result.sort().name() != "Bool":
             return visit_result
+
         result = Tactic("ctx-solver-simplify")(visit_result)[0]
 
         if len(result) == 0:
@@ -51,7 +53,7 @@ class ConditionVisitor(BNILVisitor):
         if len(result) < 2:
             return result[0]
 
-        return reduce(And, result)
+        return And(*result)
 
     def visit_MLIL_CMP_E(self, expr):
         left = self.visit(expr.left)
@@ -92,13 +94,18 @@ class ConditionVisitor(BNILVisitor):
 
     def visit_MLIL_LOAD(self, expr):
         src = self.visit(expr.src)
-        return make_load(src, expr.size)
+
+        if src is not None:
+            log_info(f'{expr.src.size} {src.sort()}')
+            return self.mem[expr.src.size][src]
 
     def visit_MLIL_VAR_FIELD(self, expr):
         src = make_variable(expr.src)
         offset = expr.offset
         size = expr.size
 
+        # TODO: change this to var field name instead of extracting
+        # because we don't actually care about this
         return Extract(((offset + size) * 8) - 1, (offset * 8), src)
 
     def visit_MLIL_VAR(self, expr):
