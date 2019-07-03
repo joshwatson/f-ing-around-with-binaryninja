@@ -240,11 +240,9 @@ class UnlockVisitor(BNILVisitor, BackgroundTaskThread):
                             return self.queue_prev_block(expr)
                         elif expr.src.operation == MediumLevelILOperation.MLIL_VAR:
                             pop_var = expr.src.ssa_form.src
-                            push_var_def = expr.function.ssa_form[
-                                expr.function.get_ssa_var_definition(pop_var)
-                            ]
+                            push_var_def = expr.ssa_form.function.get_ssa_var_definition(pop_var)
                             if expr.function.get_ssa_var_uses(push_var_def.dest) == [
-                                expr.instr_index
+                                expr
                             ]:
                                 self.convert_to_nop(expr.address)
                                 self.convert_to_nop(push_var_def.address)
