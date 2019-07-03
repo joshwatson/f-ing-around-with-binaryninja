@@ -12,7 +12,7 @@ from z3 import (
     Tactic,
 )
 
-from binaryninja import BinaryView, Variable, VariableSourceType, log_info
+from binaryninja import BinaryView, Variable, VariableSourceType, log_info, log_debug
 
 from .bnilvisitor import BNILVisitor
 
@@ -96,7 +96,7 @@ class ConditionVisitor(BNILVisitor):
         src = self.visit(expr.src)
 
         if src is not None:
-            log_info(f'{expr.src.size} {src.sort()}')
+            log_debug(f'{expr.src.size} {src.sort()}')
             return self.mem[expr.src.size][src]
 
     def visit_MLIL_VAR_FIELD(self, expr):

@@ -31,7 +31,7 @@ unsigned_ops = {
 class ConstraintVisitor:
     def __init__(self, function: Function):
         self._function = function
-        self._in_not = False
+        self._in_not = []
 
     def visit(self, expression):
         method_name = f"visit_{expression.__class__.__name__}"
@@ -48,11 +48,11 @@ class ConstraintVisitor:
             if orig_operation.startswith('U'):
                 orig_operation = unsigned_ops[orig_operation]
 
-            if self._in_not:
+            if self._in_not and self._in_not[-1]:
                 operation = negations.get(orig_operation)
                 if operation is None:
                     operation = orig_operation
-                    self._in_not = False
+                    self._in_not[-1] = False
             else:
                 operation = orig_operation
 
@@ -91,7 +91,8 @@ class ConstraintVisitor:
 
         elif expr.num_args() == 1:
             if expr.decl().name() == "not":
-                self._in_not = True
+                self._in_not.append(True)
+
             arg = self.visit(expr.arg(0))
             result = (
                 (
@@ -101,7 +102,7 @@ class ConstraintVisitor:
                             "!("
                         )
                     ]
-                    if not self._in_not
+                    if self._in_not and not self._in_not[-1]
                     else []
                 )
                 + arg
@@ -112,12 +113,12 @@ class ConstraintVisitor:
                             ")"
                         )
                     ]
-                    if not self._in_not
+                    if self._in_not and not self._in_not[-1]
                     else []
                 )
             )
 
-            self._in_not = False
+            self._in_not.pop() if self._in_not else None
             return result
 
         elif expr.num_args() > 2:

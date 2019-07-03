@@ -9,6 +9,7 @@ from binaryninja import (
     MediumLevelILInstruction,
     MediumLevelILOperation,
     log_debug,
+    log_info
 )
 
 from . import mlil_ast
@@ -38,16 +39,20 @@ class MediumLevelILAstNode(object):
         return None
 
     def __lt__(self, other):
-        log_debug("MediumLevelILAstNode.__lt__")
         result = (
             True
-            if self._ast.reaching_conditions.get((self.block, other.block))
-            is not None
-            else True
+            if (
+                self._ast.reaching_conditions.get(
+                    (self.block, other.block)
+                ) is not None and
+                self._ast.reaching_conditions.get(
+                    (other.block, self.block)
+                ) is None
+            ) else True
             if self.start < other.start
             else False
         )
-        log_debug(f"{self} < {other} == {result}")
+        log_debug(f'{self} < {other} == {result}')
         return result
 
     def __le__(self, other):
@@ -169,8 +174,15 @@ class MediumLevelILAstCaseNode(MediumLevelILAstSeqNode):
         return self._value
 
     def __lt__(self, other):
+        log_debug(f'{self} < {other}')
         if self._value == ["default"]:
+            log_debug(f'False')
             return False
+
+        if other._value == ['default']:
+            return True
+
+        log_debug(f'{super().__lt__(other)}')
 
         return super().__lt__(other)
 
@@ -199,7 +211,7 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
         self._flatten_conditions()
 
     def _flatten_conditions(self):
-        log_debug(f"_flatten_conditions {self.condition}")
+        log_debug(f"_flatten_conditions {self.condition} {self._condition_il!r}")
         if self[True] is None:
             return
 
@@ -224,14 +236,14 @@ class MediumLevelILAstCondNode(MediumLevelILAstNode):
         for node in nodes:
             if node[False] is not None:
                 return
-            log_debug(f"+ {node._condition}")
+            log_debug(f"+ {node}")
             node._condition = reduce(
                 And,
                 Tactic("ctx-solver-simplify")(
                     And(self._condition, node._condition)
                 )[0],
             )
-            log_debug(f"flattened condition: {node._condition}")
+            log_debug(f"flattened condition: {node} -> {node._condition}")
             new_conditions.append(node)
 
         self.__class__ = MediumLevelILAstSeqNode
@@ -319,7 +331,7 @@ class MediumLevelILAstLoopNode(MediumLevelILAstNode):
     def __init__(
         self,
         ast: mlil_ast.MediumLevelILAst,
-        body: MediumLevelILAstSeqNode,
+        body: MediumLevelILAstSeqNode = None,
         condition=_true_condition,
         loop_type: str = "endless",
     ):
@@ -447,16 +459,46 @@ class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):
         return self._bb[0].address
 
     def __lt__(self, other):
-        log_debug("__lt__")
         result = (
             True
-            if self._ast.reaching_conditions.get((self.block, other.block))
-            is not None
+            if (
+                self._ast.reaching_conditions.get(
+                    (self.block, other.block)
+                ) is not None and
+                self._ast.reaching_conditions.get(
+                    (other.block, self.block)
+                ) is None
+            ) else False
+            if self._ast.reaching_conditions.get(
+                (self.block, other.block)
+            ) is None
+            else True
+            if self.start < other.start
             else False
         )
-
-        log_debug(f"{self} < {other} == {result}")
+        log_debug(f'{self} < {other} == {result}')
         return result or (self.start == other.start and other.type == "cond")
+
+    def __gt__(self, other):
+        result = (
+            True
+            if (
+                self._ast.reaching_conditions.get(
+                    (other.block, self.block)
+                ) is not None and
+                self._ast.reaching_conditions.get(
+                    (self.block, other.block)
+                ) is None
+            ) else False
+            if self._ast.reaching_conditions.get(
+                (other.block, self.block)
+            ) is None
+            else True
+            if self.start > other.start
+            else False
+        )
+        log_debug(f'{self} > {other} == {result}')
+        return result or (self.start == other.start and self.type == 'cond')
 
     def __eq__(self, other):
         if isinstance(other, MediumLevelILBasicBlock):
