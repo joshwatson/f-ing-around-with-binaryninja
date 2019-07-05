@@ -4,7 +4,7 @@ from functools import cmp_to_key, reduce
 from itertools import product, repeat
 from typing import List
 
-from z3 import And, BoolVal, Not, Or, Tactic, is_true, simplify
+from z3 import And, BoolVal, Not, Or, Tactic, is_true, simplify, is_false
 
 from binaryninja import (
     BranchType,
@@ -17,6 +17,8 @@ from binaryninja import (
     RegisterValueType,
     log_debug,
     log_info,
+    ReportCollection,
+    show_report_collection
 )
 
 from .condition_visitor import ConditionVisitor
@@ -31,6 +33,7 @@ from .nodes import (
     MediumLevelILAstSeqNode,
     MediumLevelILAstSwitchNode,
 )
+from .debug import generate_graph
 
 
 def region_sort(nodes):
@@ -94,6 +97,8 @@ class MediumLevelILAst(object):
         self._regions = {}
         self._reaching_conditions = {}
         self._reaching_constraints = {}
+
+        self.report_collection = None
 
         self.view.session_data["CurrentAST"] = self
 
@@ -349,6 +354,8 @@ class MediumLevelILAst(object):
         return dict(self._reaching_constraints)
 
     def generate(self):
+        self.report_collection = ReportCollection()
+
         # step 1: identify cycles
         self._cycles = {
             e.target
@@ -365,14 +372,17 @@ class MediumLevelILAst(object):
 
         # step 3: find all the regions
         self._regions = self._find_regions()
+        generate_graph(self.view, self.regions[0][1], self.report_collection, 'Step 3')
 
         # step 6: merge if/else statements
         self._merge_if_else()
+        generate_graph(self.view, self.regions[0][1], self.report_collection, 'Step 6')
 
         # # step 7: refine loops
         self._refine_loops()
+        generate_graph(self.view, self.regions[0][1], self.report_collection, 'Step 7')
 
-        log_debug(f"{self.regions}")
+        show_report_collection('AST Generation', self.report_collection)
 
         log_debug("finished with AST")
 
@@ -397,6 +407,13 @@ class MediumLevelILAst(object):
 
             if new_region is None:
                 continue
+
+            if self.report_collection is not None:
+                generate_graph(
+                    self.view,
+                    new_region,
+                    self.report_collection
+                )
 
             log_debug(f"adding {new_region} to regions")
             regions[bb] = new_region
@@ -606,29 +623,41 @@ class MediumLevelILAst(object):
             for block in loop_nodes
         ]
 
-        loop_nodes = region_sort(loop_nodes)
+        sorted_loop_nodes = region_sort(loop_nodes)
+        loop_nodes = list(sorted_loop_nodes)
+        log_debug(f"Sorted loop_nodes: {loop_nodes}")
 
         # remove any regions that are in the loop nodes
         nodes = []
-        for r in loop_nodes:
+        while sorted_loop_nodes:
+            r = sorted_loop_nodes.pop(0)
+
+            log_debug(f'Iterating on {r.block}')
             if r.block in regions:
+                log_debug(f'Found {r.block} in regions')
                 sub_region = regions[r.block]
             else:
-                if bb == r.block:
-                    continue
-
+                log_debug(f'{r.block} not in regions, creating Seq Node')
                 sub_region = MediumLevelILAstSeqNode(
                         self,
                         [MediumLevelILAstBasicBlockNode(self, r.block)],
                     )
 
+            log_debug(f"Creating node for {r.block}")
             if self.create_new_node_from_region(
                 bb, r.block, sub_region, loop_node, None, nodes
             ):
                 if r.block in regions:
+                    log_debug(f"Removing region for {r.block}")
                     del regions[r.block]
 
-            self.remove_sub_region_nodes(sub_region, loop_nodes)
+            log_debug(f"Removing {sub_region} from loop_nodes")
+            self.remove_sub_region_nodes(sub_region, sorted_loop_nodes)
+
+            for n in loop_nodes:
+                log_debug(f"Removing {n} from bb_queue")
+                if n.block in bb_queue:
+                    bb_queue.remove(n.block)
 
         log_debug('Adding break nodes for successors')
 
@@ -679,7 +708,7 @@ class MediumLevelILAst(object):
         if successor_cond is not None:
             successor_node = successor_cond
 
-        body = MediumLevelILAstSeqNode(self, sorted(list(nodes)))
+        body = MediumLevelILAstSeqNode(self, nodes)
         loop_node._body = body
 
         if successor_node is not None:
@@ -711,7 +740,7 @@ class MediumLevelILAst(object):
 
         if sub_region.type != "loop" and reaching_constraint is not None:
             # This is now a condition node if a reaching constraint exists
-            log_debug(f'\n\nCreating new CondNode with {reaching_constraint}\n\n')
+            log_debug(f'    Creating new CondNode with {sub_region} {reaching_constraint}\n\n')
             new_node = MediumLevelILAstCondNode(
                 self,
                 reaching_constraint,
@@ -946,59 +975,12 @@ class MediumLevelILAst(object):
         self, parent, node1, node2, nodes_to_check, nodes_to_remove
     ):
         log_debug("try_make_complex_if_else")
-        cond1 = node1.condition
-        cond2 = node2.condition
+        is_complex_if_else = self.find_c_and_R(node1.condition, node2.condition)
 
-        log_debug(f"{cond1} vs {cond2}")
-
-        to_visit = [(cond1, BoolVal(True))]
-
-        while to_visit:
-            current_cond, right_side = to_visit.pop()
-            log_debug(f"current: {current_cond} right: {right_side}")
-
-            # If the top level operation is not an And, we don't need
-            # to go any further.
-            if current_cond.decl().name() != "and":
-                log_debug(f"current_cond is {current_cond}")
-                return False
-
-            if current_cond.num_args() < 2:
-                log_debug(f"current_cond: {current_cond}")
-                return False
-
-            # try 0 and R first
-            c = current_cond.arg(0)
-            R = And(
-                *Tactic("ctx-solver-simplify")(
-                    And(current_cond.arg(1), right_side)
-                )[0]
-            )
-            log_debug(f"c: {c} R: {R} cond2: {cond2}")
-            if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
-                log_debug(
-                    f"Found complex if/else (0-1)! {R} and {c} | {cond2}"
-                )
-                break
-
-            # try again, but the other way
-            c = current_cond.arg(1)
-            R = And(
-                *Tactic("ctx-solver-simplify")(
-                    And(current_cond.arg(0), right_side)
-                )[0]
-            )
-            log_debug(f"c: {c} R: {R} cond2: {cond2}")
-            if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
-                log_debug(
-                    f"Found complex if/else (1-0)! {R} and {c} | {cond2}"
-                )
-                break
-
-            to_visit = [
-                (current_cond.arg(0), current_cond.arg(1)),
-                (current_cond.arg(1), current_cond.arg(0)),
-            ]
+        if not is_complex_if_else:
+            return False
+        else:
+            c, R = is_complex_if_else
 
         # if we get here, we have a complex if/else
         new_if_else_node = MediumLevelILAstCondNode(
@@ -1024,6 +1006,70 @@ class MediumLevelILAst(object):
             nodes_to_check.remove(node2)
         else:
             log_debug(f'{node1} not in parent.nodes')
+
+    def find_c_and_R(self, cond1, cond2):
+        log_info(f"{cond1} vs {cond2}")
+
+        if cond1.decl().name() != "and":
+            cond1 = And(cond1, BoolVal(True))
+        if cond2.decl().name() != "and":
+            cond2 = And(cond2, BoolVal(True))
+
+        to_visit = [(cond1, BoolVal(True))]
+
+        while to_visit:
+            current_cond, right_side = to_visit.pop()
+            log_info(f"current: {current_cond} right: {right_side}")
+
+            # If the top level operation is not an And, we don't need
+            # to go any further.
+            if current_cond.decl().name() != "and":
+                log_info(f"current_cond is {current_cond}")
+                return False
+
+            if current_cond.num_args() < 2:
+                log_info(f"current_cond is {current_cond}")
+                return False
+
+            # try 0 and R first
+            c = current_cond.arg(0)
+            R = And(
+                *Tactic("ctx-solver-simplify")(
+                    And(current_cond.arg(1), right_side)
+                )[0]
+            )
+            if R.num_args() == 0:
+                R = BoolVal(True)
+
+            log_info(f"c: {c} R: {R} cond2: {cond2}")
+            if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
+                log_info(
+                    f"Found complex if/else (0-1)! {R} and {c} | {cond2}"
+                )
+                return c, R
+
+            # try again, but the other way
+            c = current_cond.arg(1)
+            R = And(
+                *Tactic("ctx-solver-simplify")(
+                    And(current_cond.arg(0), right_side)
+                )[0]
+            )
+            if R.num_args() == 0:
+                R = BoolVal(True)
+            log_info(f"c: {c} R: {R} cond2: {cond2}")
+            if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
+                log_info(
+                    f"Found complex if/else (1-0)! {R} and {c} | {cond2}"
+                )
+                return c, R
+
+            to_visit = [
+                (current_cond.arg(0), current_cond.arg(1)),
+                (current_cond.arg(1), current_cond.arg(0)),
+            ]
+
+        return False
 
     def generate_reaching_constraints(self):
         visitor = ConditionVisitor(self.view)
@@ -1080,7 +1126,7 @@ class MediumLevelILAst(object):
                 self._reaching_constraints[(start, end)] = reaching_constraint
 
     def _refine_loops(self):
-        log_debug("_refine_loops")
+        log_info("_refine_loops")
 
         to_visit = [r for r in self._regions.values()]
 
@@ -1093,7 +1139,7 @@ class MediumLevelILAst(object):
                 continue
 
             if node in visited:
-                log_debug(f"wtf, why have I visited {node} already")
+                log_info(f"wtf, why have I visited {node} already")
                 break
 
             if node.type == "seq":
@@ -1103,11 +1149,18 @@ class MediumLevelILAst(object):
                 to_visit += node[False].nodes if node[False] else []
 
             if node.type == "loop":
-                log_debug(f"{node}")
+                log_info(f"{node}")
+
+                generate_graph(
+                    self.view,
+                    node,
+                    self.report_collection,
+                    f'    {node.start} before refining'
+                )
 
                 while_condition = self._check_while(node)
                 if while_condition is not None:
-                    log_debug(f"{node} is a while loop")
+                    log_info(f"{node} is a while loop")
                     node.loop_type = "while"
                     node.condition = reduce(
                         And,
@@ -1134,7 +1187,7 @@ class MediumLevelILAst(object):
 
                 dowhile_condition = self._check_do_while(node)
                 if dowhile_condition is not None:
-                    log_debug(f"{node} is a do while loop")
+                    log_info(f"{node} is a do while loop")
                     node.loop_type = "dowhile"
                     node.condition = reduce(
                         And,
@@ -1162,43 +1215,76 @@ class MediumLevelILAst(object):
                         ):
                             node.body._nodes[idx] = child[True]
 
+                        log_info(f"Checking {child} for break condition")
+                        if (
+                            isinstance(child, MediumLevelILAstCondNode)
+                            and is_false(
+                                simplify(And(child.condition, node.condition))
+                            )
+                        ):
+                            is_complex_if = self.find_c_and_R(Not(child.condition), node.condition)
+
+                            if is_complex_if:
+                                c, R = is_complex_if
+                                log_info(f'Found c: {c} R: {R}')
+                                child[True]._nodes.append(
+                                    MediumLevelILAstBreakNode(
+                                        self,
+                                        child[True].nodes[-1].block[-1].instr_index,
+                                        child[True].nodes[-1].block[-1].address
+                                    )
+                                )
+                            else:
+                                child[True]._nodes.append(
+                                    MediumLevelILAstBreakNode(
+                                        self,
+                                        child[True].nodes[-1].block[-1].instr_index,
+                                        child[True].nodes[-1].block[-1].address
+                                    )
+                                )
+
+                generate_graph(
+                    self.view,
+                    node,
+                    self.report_collection,
+                    f'    {node.start} after refining'
+                )
+
     def _check_while(self, loop_node: MediumLevelILAstLoopNode):
-        log_debug("_check_while")
+        log_info("_check_while")
         if loop_node.loop_type != "endless":
-            log_debug(loop_node.loop_type)
+            log_info(loop_node.loop_type)
             return None
 
         if loop_node.body.nodes[0].type != "cond":
-            log_debug(f"{loop_node.body.nodes[0].type}")
+            log_info(f"{loop_node.body.nodes[0].type}")
             return None
 
-        log_debug(f"{loop_node.body.nodes[0][True].nodes}")
+        log_info(f"{loop_node.body.nodes[0][True].nodes}")
 
         if loop_node.body.nodes[0][True].nodes[0].type == "break":
-            log_debug(f"The loop body is {loop_node.body.nodes}")
+            log_info(f"The loop body is {loop_node.body.nodes}")
             return loop_node.body.nodes[0].condition
 
-        log_debug(f"{loop_node.body.nodes[0][True].nodes}")
+        log_info(f"{loop_node.body.nodes[0][True].nodes}")
 
         return None
 
     def _check_do_while(self, loop_node: MediumLevelILAstLoopNode) -> bool:
-        log_debug("_check_do_while")
-        log_debug(f"{loop_node.body.nodes}")
+        log_info("_check_do_while")
+        log_info(f"{loop_node.body.nodes}")
         if loop_node.loop_type != "endless":
-            log_debug(loop_node.loop_type)
+            log_info(loop_node.loop_type)
             return None
 
         if loop_node.body.nodes[-1].type != "cond":
-            log_debug(f"{loop_node.body.nodes[-1].type}")
+            log_info(f"final node is: {loop_node.body.nodes[-1].type}")
             return None
 
-        log_debug(f"{loop_node.body.nodes[-1][True].nodes}")
+        log_info(f"final cond true node: {loop_node.body.nodes[-1][True].nodes}")
 
         if loop_node.body.nodes[-1][True].nodes[0].type == "break":
             return loop_node.body.nodes[-1].condition
-
-        log_debug(f"{loop_node.body.nodes[-1][True].nodes}")
 
         return None
 
