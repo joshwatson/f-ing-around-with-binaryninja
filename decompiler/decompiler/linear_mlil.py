@@ -20,7 +20,7 @@
 
 from itertools import repeat
 
-from z3 import Not
+from z3 import Not, is_false
 
 from binaryninja import (
     BinaryDataNotification,
@@ -48,6 +48,7 @@ from PySide2.QtCore import Qt
 from .constraint_visitor import ConstraintVisitor
 from .mlil_ast import MediumLevelILAst
 from .nodes import MediumLevelILAstElseNode
+from .token_visitor import TokenVisitor
 
 _CodeDisassemblyLineType = LinearDisassemblyLineType.CodeDisassemblyLineType
 
@@ -224,13 +225,16 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
                     il_lines, _ = renderer.get_disassembly_text(il.instr_index)
 
                     for line in il_lines:
-                        line.tokens.insert(
-                            0,
+
+                        new_tokens = TokenVisitor().visit(il)
+
+                        line.tokens = [
                             InstructionTextToken(
                                 InstructionTextTokenType.TextToken,
                                 f'{" "*indent}',
                             ),
-                        )
+                            *new_tokens
+                        ]                            
 
                         result.append(
                             LinearDisassemblyLine(
@@ -269,6 +273,9 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
                 line_index += 1
 
             elif current_node.type == "cond":
+                if is_false(current_node.condition):
+                    continue
+
                 if current_node[True] is not None:
                     condition = ConstraintVisitor(self.function).visit(
                         current_node.condition
@@ -534,6 +541,7 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
 
         return result
 
+
     def eliminate_unused_vars(self, lines):
         log_debug("eliminate_unused_vars")
 
@@ -572,7 +580,12 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
                         # of a particular Variable since we can't be sure
                         # of the SSA version here
                         untracked_variables.update(
-                            set(self.function.mlil.get_var_definitions(var))
+                            set(
+                                (
+                                    i.instr_index
+                                    for i in self.function.mlil.get_var_definitions(var)
+                                )
+                            )
                         )
 
                     continue
@@ -636,7 +649,7 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
                         not self.function.mlil.get_var_uses(var)):
                     lines_to_remove.append(line)
                 elif all(
-                    d in indices_removed
+                    d.instr_index in indices_removed
                     for d in defs
                 ):
                     lines_to_remove.append(line)
@@ -717,6 +730,19 @@ class LinearMLILViewType(ViewType):
                 "id" : "priority"
             }"""
             ),
+        )
+        settings.register_setting(
+            "linearmlil.debug",
+            (
+                """{
+                    "description": "Turn on debug reports for Linear MLIL view.",
+                    "title": "Show Debug Graphs",
+                    "default": true,
+                    "type": "boolean",
+                    "id": "debug"
+                }
+                """
+            )
         )
 
     def getPriority(self, data, filename):

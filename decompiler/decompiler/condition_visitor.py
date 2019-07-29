@@ -1,18 +1,22 @@
 from z3 import (
     UGT,
     ULE,
+    ULT,
+    UGE,
     And,
     Array,
     BitVec,
     BitVecSort,
+    BitVecVal,
     BoolVal,
     Extract,
     Not,
     Or,
     Tactic,
+    ZeroExt
 )
 
-from binaryninja import BinaryView, Variable, VariableSourceType, log_info, log_debug
+from binaryninja import BinaryView, Variable, VariableSourceType, log_info, log_debug, TypeClass
 
 from .bnilvisitor import BNILVisitor
 
@@ -22,7 +26,7 @@ def make_variable(var: Variable):
         if var.source_type == VariableSourceType.RegisterVariableSourceType:
             var.name = var.function.arch.get_reg_by_index(var.storage)
         else:
-            raise NotImplementedError()
+            var.name = f'var_{abs(var.storage):x}'
     return BitVec(var.name, var.type.width * 8)
 
 
@@ -58,39 +62,63 @@ class ConditionVisitor(BNILVisitor):
     def visit_MLIL_CMP_E(self, expr):
         left = self.visit(expr.left)
         right = self.visit(expr.right)
-
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
         return left == right
 
     def visit_MLIL_CMP_NE(self, expr):
         left = self.visit(expr.left)
         right = self.visit(expr.right)
-
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
         return left != right
 
     def visit_MLIL_CMP_SLE(self, expr):
         left, right = self.visit_both_sides(expr)
-
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
         return left <= right
+
+    def visit_MLIL_CMP_SLT(self, expr):
+        left, right = self.visit_both_sides(expr)
+
+        return left < right
 
     def visit_MLIL_CMP_SGT(self, expr):
         left, right = self.visit_both_sides(expr)
-
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
         return left > right
 
     def visit_MLIL_CMP_SGE(self, expr):
         left, right = self.visit_both_sides(expr)
-
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
         return left >= right
 
     def visit_MLIL_CMP_UGT(self, expr):
         left, right = self.visit_both_sides(expr)
-
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
         return UGT(left, right)
+
+    def visit_MLIL_CMP_UGE(self, expr):
+        left, right = self.visit_both_sides(expr)
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
+        return UGE(left, right)
 
     def visit_MLIL_CMP_ULE(self, expr):
         left, right = self.visit_both_sides(expr)
-
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
         return ULE(left, right)
+
+    def visit_MLIL_CMP_ULT(self, expr):
+        left, right = self.visit_both_sides(expr)
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
+        return ULT(left, right)
 
     def visit_MLIL_LOAD(self, expr):
         src = self.visit(expr.src)
@@ -104,9 +132,40 @@ class ConditionVisitor(BNILVisitor):
         offset = expr.offset
         size = expr.size
 
-        # TODO: change this to var field name instead of extracting
-        # because we don't actually care about this
-        return Extract(((offset + size) * 8) - 1, (offset * 8), src)
+        if expr.src.type.type_class == TypeClass.ArrayTypeClass:
+            element_width = expr.src.type.element_type.width
+            index = element_width // offset
+            return BitVec(f'{expr.src.name}[{index}]', size * 8)
+
+        if expr.src.type.type_class == TypeClass.StructureTypeClass:
+            raise NotImplementedError()
+
+        elif (expr.src.source_type ==
+                VariableSourceType.RegisterVariableSourceType):
+            sub_register = next(
+                (
+                    name
+                    for name, r in expr.src.function.arch.regs.items()
+                    if (r.full_width_reg == expr.src.name and
+                        r.size == size and
+                        r.offset == offset)
+                ),
+                None
+            )
+            if sub_register is None:
+                # This means that the variable was probably renamed, and it's
+                # still just a register access.
+                if expr.src.type.width == size:
+                    sub_register = expr.src.name
+                else:
+                    raise NotImplementedError()
+
+            return BitVec(sub_register, size * 8)
+
+        else:
+            # TODO: change this to var field name instead of extracting
+            # because we don't actually care about this
+            return Extract(((offset + size) * 8) - 1, (offset * 8), src)
 
     def visit_MLIL_VAR(self, expr):
         return make_variable(expr.src)
@@ -114,7 +173,7 @@ class ConditionVisitor(BNILVisitor):
     def visit_MLIL_CONST(self, expr):
         if expr.size == 0 and expr.constant in (0, 1):
             return BoolVal(True) if expr.constant else BoolVal(False)
-        return expr.constant
+        return BitVecVal(expr.constant, expr.size * 8)
 
     def visit_MLIL_NOT(self, expr):
         return Not(self.visit(expr.src))
@@ -127,11 +186,22 @@ class ConditionVisitor(BNILVisitor):
 
     def visit_MLIL_ADD(self, expr):
         left, right = self.visit_both_sides(expr)
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
         return left + right
 
     def visit_MLIL_ADDRESS_OF(self, expr):
+        if expr.src.name:
+            var_name = expr.src.name
+        elif (expr.src.source_type ==
+                VariableSourceType.StackVariableSourceType):
+            var_name = f'var_{abs(expr.src.storage):x}'
+        else:
+            var_name = expr.function.arch.get_reg_by_index(expr.src.storage)
+
+        print(f'var_name: {repr(var_name)}')
         return BitVec(
-            f"&{expr.src.name}",
+            f"&{var_name}",
             (expr.size * 8)
             if expr.size
             else expr.function.source_function.view.address_size * 8,
@@ -139,6 +209,10 @@ class ConditionVisitor(BNILVisitor):
 
     def visit_MLIL_LSL(self, expr):
         left, right = self.visit_both_sides(expr)
+
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
+
         return left << right
 
     def visit_both_sides(self, expr):

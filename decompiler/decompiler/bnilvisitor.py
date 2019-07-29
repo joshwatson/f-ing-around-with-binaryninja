@@ -10,6 +10,6 @@ class BNILVisitor(object):
         if hasattr(self, method_name):
             value = getattr(self, method_name)(expression)
         else:
-            log_debug(f"{repr(expression.operation)}")
+            print(f"{repr(expression.operation)}")
             value = None
         return value

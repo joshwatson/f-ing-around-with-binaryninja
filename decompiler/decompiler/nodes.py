@@ -326,6 +326,9 @@ class MediumLevelILAstBreakNode(MediumLevelILAstNode):
     def __iter__(self):
         return iter([])
 
+    def __hash__(self):
+        return hash(self.start)
+
 
 class MediumLevelILAstLoopNode(MediumLevelILAstNode):
     def __init__(

@@ -5,7 +5,8 @@ from binaryninja import (
     TypeClass,
     VariableSourceType,
     log_debug,
-    log_info
+    log_info,
+    log_warn
 )
 
 negations = {
@@ -38,7 +39,7 @@ class ConstraintVisitor:
         if hasattr(self, method_name):
             value = getattr(self, method_name)(expression)
         else:
-            log_info(f"visit_{method_name} missing")
+            log_debug(f"visit_{method_name} missing")
             value = None
         return value
 
@@ -330,12 +331,13 @@ class ConstraintVisitor:
             )
 
         if var is None:
-            log_debug(f"var is None: {expr.decl().name()}")
+            log_warn(f"var is None: {expr.decl().name()}")
 
             return [
                 InstructionTextToken(
                     InstructionTextTokenType.TextToken,
-                    '<Unknown token>'
+                    '<Unknown token>' if not expr.decl().name()
+                    else expr.decl().name()
                 )
             ]
 

@@ -4,7 +4,7 @@ from functools import cmp_to_key, reduce
 from itertools import product, repeat
 from typing import List
 
-from z3 import And, BoolVal, Not, Or, Tactic, is_true, simplify, is_false
+from z3 import And, BoolVal, Not, Or, Tactic, is_false, is_true, simplify
 
 from binaryninja import (
     BranchType,
@@ -15,13 +15,16 @@ from binaryninja import (
     MediumLevelILOperation,
     PossibleValueSet,
     RegisterValueType,
+    ReportCollection,
+    Settings,
     log_debug,
     log_info,
-    ReportCollection,
-    show_report_collection
+    log_warn,
+    show_report_collection,
 )
 
 from .condition_visitor import ConditionVisitor
+from .debug import generate_graph, graph_slice
 from .nodes import (
     MediumLevelILAstBasicBlockNode,
     MediumLevelILAstBreakNode,
@@ -33,7 +36,6 @@ from .nodes import (
     MediumLevelILAstSeqNode,
     MediumLevelILAstSwitchNode,
 )
-from .debug import generate_graph
 
 
 def region_sort(nodes):
@@ -51,13 +53,17 @@ def region_sort(nodes):
                 if nodes[j] > nodes[i]:
                     sorted_region[i] = sorted_region.get(i, list())
                     sorted_region[i].append(j)
-                    sorted_region_reverse[j] = sorted_region_reverse.get(j, list())
+                    sorted_region_reverse[j] = sorted_region_reverse.get(
+                        j, list()
+                    )
                     sorted_region_reverse[j].append(i)
             else:
                 if nodes[i] > nodes[j]:
                     sorted_region[j] = sorted_region.get(j, list())
                     sorted_region[j].append(i)
-                    sorted_region_reverse[i] = sorted_region_reverse.get(i, list())
+                    sorted_region_reverse[i] = sorted_region_reverse.get(
+                        i, list()
+                    )
                     sorted_region_reverse[i].append(j)
 
     log_debug(f"sorted_region: {sorted_region}")
@@ -71,12 +77,13 @@ def region_sort(nodes):
         for i in range(len(nodes)):
             if i in added:
                 continue
-            if (not sorted_region_reverse[i] or
-                    all(x in added for x in sorted_region_reverse[i])):
+            if not sorted_region_reverse[i] or all(
+                x in added for x in sorted_region_reverse[i]
+            ):
                 added.add(i)
                 new_order.append(nodes[i])
             log_debug(f"current: {new_order}")
-        log_debug(f'{any(j not in added for j in range(len(nodes)))}')
+        log_debug(f"{any(j not in added for j in range(len(nodes)))}")
         sentinel += 1
         if sentinel > 20:
             break
@@ -151,24 +158,28 @@ class MediumLevelILAst(object):
         return dict(self._nodes)
 
     def case_sort(self, cases: List[MediumLevelILAstCaseNode]):
-        log_debug('case_sort')
-        log_debug(f'initial: {cases}\n\n')
+        log_debug("case_sort")
+        log_debug(f"initial: {cases}\n\n")
 
         fallsthrough = {}
         sorted_cases = sorted(cases)
-        log_debug(f'sorted_cases: {sorted_cases}\n\n')
+        log_debug(f"sorted_cases: {sorted_cases}\n\n")
         for i in range(len(sorted_cases)):
             for j in range(i, len(sorted_cases)):
                 if self.reaching_conditions.get(
                     (sorted_cases[i].block, sorted_cases[j].block)
                 ):
-                    log_debug(f'i->j {self.reaching_conditions[(sorted_cases[i].block,sorted_cases[j].block)]}')
+                    log_debug(
+                        f"i->j {self.reaching_conditions[(sorted_cases[i].block,sorted_cases[j].block)]}"
+                    )
                     fallsthrough[i] = fallsthrough.get(i, list())
                     fallsthrough[i].append(j)
                 elif self.reaching_conditions.get(
                     (sorted_cases[j].block, sorted_cases[i].block)
                 ):
-                    log_debug(f'j->i {self.reaching_conditions[(sorted_cases[j].block,sorted_cases[i].block)]}')
+                    log_debug(
+                        f"j->i {self.reaching_conditions[(sorted_cases[j].block,sorted_cases[i].block)]}"
+                    )
                     fallsthrough[j] = fallsthrough.get(j, list())
                     fallsthrough[j].append(i)
 
@@ -179,24 +190,21 @@ class MediumLevelILAst(object):
 
             if case in fallsthrough:
                 others = fallsthrough[case]
-                log_debug(f'fallsthrough[{case}]: {others}')
+                log_debug(f"fallsthrough[{case}]: {others}")
                 # Collect cases and replace them with None
                 # Don't collect if it's already None, because
                 # that means we already got it.
                 sub_list = (
-                    (
-                        [sorted_cases[case]]
-                        if sorted_cases[case] is not None
-                        else []
-                    ) +
-                    [sorted_cases[o] for o in others if o is not None]
-                )
-                map(lambda i: sorted_cases.insert(i, None), [case]+[others])
+                    [sorted_cases[case]]
+                    if sorted_cases[case] is not None
+                    else []
+                ) + [sorted_cases[o] for o in others if o is not None]
+                map(lambda i: sorted_cases.insert(i, None), [case] + [others])
                 new_sorted += sub_list
             else:
                 new_sorted.append(case)
 
-        log_debug(f'{new_sorted}')
+        log_debug(f"{new_sorted}")
 
         return new_sorted
 
@@ -204,20 +212,20 @@ class MediumLevelILAst(object):
         self,
         sub_region: MediumLevelILAstNode,
         block: MediumLevelILBasicBlock,
-        bb: MediumLevelILBasicBlock
+        bb: MediumLevelILBasicBlock,
     ):
-        log_debug(f'any_node_dominated: {bb} {block} {sub_region}')
+        log_debug(f"any_node_dominated: {bb} {block} {sub_region}")
 
         to_visit = []
 
         def add_to_visit(_node: MediumLevelILAstNode):
             nonlocal to_visit
-            if _node.type in ('seq', 'case'):
+            if _node.type in ("seq", "case"):
                 to_visit += _node.nodes
-            elif _node.type == 'switch':
+            elif _node.type == "switch":
                 to_visit += _node.cases
             else:
-                log_debug(f'add {node.type} to add_to_visit')
+                log_debug(f"add {_node.type} to add_to_visit")
 
         add_to_visit(sub_region)
 
@@ -225,10 +233,10 @@ class MediumLevelILAst(object):
             node = to_visit.pop()
             add_to_visit(node)
 
-            if node.type != 'case':
+            if node.type != "case":
                 continue
 
-            log_debug(f'checking {node.block}')
+            log_debug(f"checking {node.block}")
 
             reaching_conditions = self.reaching_conditions.get(
                 (bb, node.block)
@@ -245,7 +253,7 @@ class MediumLevelILAst(object):
         return False
 
     def order_basic_blocks(self):
-        log_debug('order_basic_blocks')
+        log_debug("order_basic_blocks")
         visited = set()
         ordering = []
 
@@ -259,12 +267,13 @@ class MediumLevelILAst(object):
 
         order(self._function.basic_blocks[0])
 
-        log_debug(f'ordering: {ordering}')
+        log_debug(f"ordering: {ordering}")
         return ordering
 
     def calculate_reaching_conditions(self):
         # TODO: add temporary node such that no_return nodes
         # think that they drop into the next region
+
         reaching_conditions = {}
 
         visited_nodes = set()
@@ -272,10 +281,10 @@ class MediumLevelILAst(object):
         # recursive method to create an iterator of the edges in
         # the CFG as a DFS
         def dfs_next_edge(bb, target):
-            log_debug(f'--dfs_next_edge({bb})--')
+            log_debug(f"--dfs_next_edge({bb})--")
 
             for o in bb.outgoing_edges:
-                log_debug(f'yielding {o}')
+                log_debug(f"yielding {o}")
                 yield o
                 if not o.back_edge:
                     if o.target == target:
@@ -311,7 +320,7 @@ class MediumLevelILAst(object):
                     dfs_stack = dfs_stack + [e]
 
                     if nt == ne and dfs_stack:
-                        log_debug(f'{nt} == {ne}')
+                        log_debug(f"{nt} == {ne}")
                         log_debug("    adding finished slice")
                         reaching_conditions[
                             (ns, ne)
@@ -328,9 +337,11 @@ class MediumLevelILAst(object):
                     visited_edges.add(e)
 
                 if dfs_stack:
-                    log_debug(f'    {dfs_stack}')
+                    log_debug(f"    {dfs_stack}")
                 while len(dfs_stack) and all(
-                    descendant.target in visited_nodes or descendant.source == ne or descendant.back_edge
+                    descendant.target in visited_nodes
+                    or descendant.source == ne
+                    or descendant.back_edge
                     for descendant in dfs_stack[-1].target.outgoing_edges
                 ):
                     log_debug(f"    popping {dfs_stack[-1]}")
@@ -339,6 +350,13 @@ class MediumLevelILAst(object):
                 visited_nodes.remove(ne) if ne in visited_nodes else None
 
             if (ns, ne) in reaching_conditions:
+                graph_slice(
+                    self.view,
+                    ns,
+                    ne,
+                    reaching_conditions[(ns, ne)],
+                    self.report_collection,
+                )
                 log_debug(f"finished slices: {reaching_conditions[(ns, ne)]}")
                 log_debug("-----------")
 
@@ -365,24 +383,59 @@ class MediumLevelILAst(object):
         }
 
         # step 2a: generate the reaching conditions
+        # TODO: Change this to only happen on demand, because there
+        # are probably a lot of combinations that are never actually
+        # checked. The results should be cached, and paths that do
+        # not exist should be represented as `None` so that it knows
+        # not to try to generate it again.
         self.calculate_reaching_conditions()
 
         # step 2b: generate the z3 constraints of these conditions
+        # TODO: Change this to only happen on demand, because there
+        # are probably some constraints that never actually need
+        # to be converted to z3 constraints. Cache the results.
         self.generate_reaching_constraints()
 
         # step 3: find all the regions
         self._regions = self._find_regions()
-        generate_graph(self.view, self.regions[0][1], self.report_collection, 'Step 3')
+        generate_graph(
+            self.view,
+            self.regions[0][1],
+            self.report_collection,
+            "After Step 3",
+        )
 
-        # step 6: merge if/else statements
+        # step 4: merge if/else statements
         self._merge_if_else()
-        generate_graph(self.view, self.regions[0][1], self.report_collection, 'Step 6')
+        generate_graph(
+            self.view,
+            self.regions[0][1],
+            self.report_collection,
+            "After Step 4",
+        )
 
-        # # step 7: refine loops
+        # step 5: remove conditions from nodes that don't need them
+        self._fold_conditions()
+        generate_graph(
+            self.view,
+            self.regions[0][1],
+            self.report_collection,
+            "After Step 5",
+        )
+
+        # step 6: refine loops
         self._refine_loops()
-        generate_graph(self.view, self.regions[0][1], self.report_collection, 'Step 7')
+        generate_graph(
+            self.view,
+            self.regions[0][1],
+            self.report_collection,
+            "After Step 6",
+        )
 
-        show_report_collection('AST Generation', self.report_collection)
+        if not Settings().get_bool("linearmlil.debug"):
+            return
+
+        show_report_collection("AST Generation", self.report_collection)
 
         log_debug("finished with AST")
 
@@ -409,18 +462,32 @@ class MediumLevelILAst(object):
                 continue
 
             if self.report_collection is not None:
-                generate_graph(
-                    self.view,
-                    new_region,
-                    self.report_collection
-                )
+                generate_graph(self.view, new_region, self.report_collection)
 
             log_debug(f"adding {new_region} to regions")
             regions[bb] = new_region
 
+        if len(regions) > 1:
+            log_debug(f"Regions is larger than it should be: {regions}")
+
+            sorted_regions = region_sort(
+                [MediumLevelILAstBasicBlockNode(self, r) for r in regions]
+            )
+
+            root_nodes = []
+            for sr in sorted_regions:
+                root_nodes.append(regions[sr.block])
+                del regions[sr.block]
+
+            root_region = MediumLevelILAstSeqNode(self, root_nodes)
+
+            regions[root_region.block] = root_region
+
         return regions
 
-    def _create_acyclic_region(self, bb: MediumLevelILBasicBlock, regions: dict, bb_queue: list):
+    def _create_acyclic_region(
+        self, bb: MediumLevelILBasicBlock, regions: dict, bb_queue: list
+    ):
         if next((e for e in bb.outgoing_edges if e.back_edge), None):
             # a back edge node isn't going to be the root of a region
             return
@@ -428,7 +495,9 @@ class MediumLevelILAst(object):
         current_node = None
         cases = {}
 
-        log_debug(f"{'='*40}\ncreating acyclic region for {bb.start}\n{'='*40}")
+        log_debug(
+            f"{'='*40}\ncreating acyclic region for {bb.start}\n{'='*40}"
+        )
 
         if bb[-1].operation == MediumLevelILOperation.MLIL_JUMP_TO:
             switch = bb[-1].dest.possible_values.mapping
@@ -510,17 +579,13 @@ class MediumLevelILAst(object):
                 # if there are no reaching conditions, then
                 # this doesn't fall through. Insert a break node.
                 if all(
-                    self.reaching_conditions.get(
-                        (case.block, other.block)
-                    )
+                    self.reaching_conditions.get((case.block, other.block))
                     is None
                     for other in current_node._cases
                 ):
                     case.append(
                         MediumLevelILAstBreakNode(
-                            self,
-                            case.nodes[-1].start,
-                            case.nodes[-1].address,
+                            self, case.nodes[-1].start, case.nodes[-1].address
                         )
                     )
 
@@ -540,18 +605,13 @@ class MediumLevelILAst(object):
 
     # TODO: Figure out why this breaks on bomb.bndb Phase 2
     def _create_cyclic_region(
-        self,
-        bb: MediumLevelILBasicBlock,
-        regions: dict,
-        bb_queue: list
+        self, bb: MediumLevelILBasicBlock, regions: dict, bb_queue: list
     ) -> MediumLevelILAstNode:
-        log_debug(f'_create_cyclic_region({bb}, regions, bb_queue)')
+        log_debug(f"_create_cyclic_region({bb}, regions, bb_queue)")
 
         log_debug(f"{'='*40}\ncreating cyclic region for {bb.start}\n{'='*40}")
         # Section C.1 in whitepaper: Initial Loop Nodes and Successors
-        latching_nodes = {
-            e.source for e in bb.incoming_edges if e.back_edge
-        }
+        latching_nodes = {e.source for e in bb.incoming_edges if e.back_edge}
 
         loop_slice = {
             n
@@ -594,9 +654,7 @@ class MediumLevelILAst(object):
                 ):
                     loop_nodes.add(successor)
                     old.add(successor)
-                    new = new & {
-                        e.target for e in successor.outgoing_edges
-                    }
+                    new = new & {e.target for e in successor.outgoing_edges}
 
             if old:
                 successor_nodes = successor_nodes - old
@@ -613,14 +671,12 @@ class MediumLevelILAst(object):
         loop_node = MediumLevelILAstLoopNode(
             self,
             MediumLevelILAstSeqNode(
-                self,
-                [MediumLevelILAstBasicBlockNode(self, bb)]
-                )
+                self, [MediumLevelILAstBasicBlockNode(self, bb)]
+            ),
         )
 
         loop_nodes = [
-            MediumLevelILAstBasicBlockNode(self, block)
-            for block in loop_nodes
+            MediumLevelILAstBasicBlockNode(self, block) for block in loop_nodes
         ]
 
         sorted_loop_nodes = region_sort(loop_nodes)
@@ -632,16 +688,15 @@ class MediumLevelILAst(object):
         while sorted_loop_nodes:
             r = sorted_loop_nodes.pop(0)
 
-            log_debug(f'Iterating on {r.block}')
+            log_debug(f"Iterating on {r.block}")
             if r.block in regions:
-                log_debug(f'Found {r.block} in regions')
+                log_debug(f"Found {r.block} in regions")
                 sub_region = regions[r.block]
             else:
-                log_debug(f'{r.block} not in regions, creating Seq Node')
+                log_debug(f"{r.block} not in regions, creating Seq Node")
                 sub_region = MediumLevelILAstSeqNode(
-                        self,
-                        [MediumLevelILAstBasicBlockNode(self, r.block)],
-                    )
+                    self, [MediumLevelILAstBasicBlockNode(self, r.block)]
+                )
 
             log_debug(f"Creating node for {r.block}")
             if self.create_new_node_from_region(
@@ -659,12 +714,12 @@ class MediumLevelILAst(object):
                 if n.block in bb_queue:
                     bb_queue.remove(n.block)
 
-        log_debug('Adding break nodes for successors')
+        log_debug("Adding break nodes for successors")
 
         successor_cond = None
         successor_node = None
         for successor in successor_nodes:
-            log_debug(f'successor: {successor}')
+            log_debug(f"successor: {successor}")
             reaching_constraint = self._reaching_constraints.get(
                 (bb, successor)
             )
@@ -676,23 +731,21 @@ class MediumLevelILAst(object):
                     self,
                     [
                         MediumLevelILAstBreakNode(
-                            self,
-                            successor.start,
-                            successor.source_block.start,
+                            self, successor.start, successor.source_block.start
                         )
                     ],
                 ),
             )
             nodes.append(break_node)
 
-            if successor in self._regions:
-                successor_node = self._regions[successor]
-                del self._regions[successor]
-            else:
-                successor_node = MediumLevelILAstSeqNode(
-                    self,
-                    [MediumLevelILAstBasicBlockNode(self, successor)],
-                )
+            # if successor in self._regions:
+            #     successor_node = self._regions[successor]
+            #     del self._regions[successor]
+            # else:
+            #     successor_node = MediumLevelILAstSeqNode(
+            #         self,
+            #         [MediumLevelILAstBasicBlockNode(self, successor)],
+            #     )
 
             # convert the successor nodes to a chain of
             # condition nodes for each successor
@@ -707,6 +760,9 @@ class MediumLevelILAst(object):
 
         if successor_cond is not None:
             successor_node = successor_cond
+
+            # TODO: Is this right?
+            self._regions[successor_cond.block] = successor_node
 
         body = MediumLevelILAstSeqNode(self, nodes)
         loop_node._body = body
@@ -728,19 +784,27 @@ class MediumLevelILAst(object):
         cases: dict,
         nodes: list,
     ):
-        log_debug(f'create_new_node_from_region({bb}, {block}, {sub_region}, {current_node})')
+        log_debug(
+            f"create_new_node_from_region({bb}, {block}, {sub_region}, {current_node})"
+        )
         reaching_constraint = self._reaching_constraints.get((bb, block))
 
         if is_true(reaching_constraint):
             reaching_constraint = None
 
         if reaching_constraint is not None and self.any_node_dominated(
-                sub_region, block, bb):
+            sub_region, block, bb
+        ):
             reaching_constraint = None
 
-        if sub_region.type != "loop" and reaching_constraint is not None:
+        if reaching_constraint is not None:
+            if sub_region.type == "loop":
+                sub_region = MediumLevelILAstSeqNode(self, [sub_region])
+
             # This is now a condition node if a reaching constraint exists
-            log_debug(f'    Creating new CondNode with {sub_region} {reaching_constraint}\n\n')
+            log_debug(
+                f"    Creating new CondNode with {sub_region} {reaching_constraint}\n\n"
+            )
             new_node = MediumLevelILAstCondNode(
                 self,
                 reaching_constraint,
@@ -874,12 +938,17 @@ class MediumLevelILAst(object):
 
         while nodes_to_remove:
             root = self.regions[0][1]
-            nodes_to_remove = self.find_if_else_for_node(root, root.nodes)
+            if root.type == "loop":
+                nodes_to_remove = self.find_if_else_for_node(
+                    root, root.body.nodes
+                )
+            else:
+                nodes_to_remove = self.find_if_else_for_node(root, root.nodes)
 
             for n in nodes_to_remove:
                 root._nodes.remove(n) if n in root._nodes else None
 
-        nodes_to_check = root.nodes
+        nodes_to_check = root.nodes if root.type == "seq" else root.body.nodes
         nodes_to_remove = []
 
         while nodes_to_check:
@@ -946,6 +1015,7 @@ class MediumLevelILAst(object):
                 ):
                     break
 
+        generate_graph(self.view, ni, self.report_collection)
         return nodes_to_remove
 
     def try_make_simple_if_else(
@@ -975,7 +1045,9 @@ class MediumLevelILAst(object):
         self, parent, node1, node2, nodes_to_check, nodes_to_remove
     ):
         log_debug("try_make_complex_if_else")
-        is_complex_if_else = self.find_c_and_R(node1.condition, node2.condition)
+        is_complex_if_else = self.find_c_and_R(
+            node1.condition, node2.condition
+        )
 
         if not is_complex_if_else:
             return False
@@ -989,14 +1061,16 @@ class MediumLevelILAst(object):
 
         log_debug(f"R is currently {R}")
 
-        new_cond_node = MediumLevelILAstCondNode(
-            self,
-            R,
-            node1._condition_il,
-            MediumLevelILAstSeqNode(self, [new_if_else_node]),
-        )
+        new_seq_node = MediumLevelILAstSeqNode(self, [new_if_else_node])
 
-        log_debug(f"{new_cond_node}")
+        if is_true(R):
+            new_cond_node = new_if_else_node
+        else:
+            new_cond_node = MediumLevelILAstCondNode(
+                self, R, node1._condition_il, new_seq_node
+            )
+
+        log_debug(f"new_cond_node: {new_cond_node}")
 
         if node1 in parent.nodes:
             node1_idx = parent.nodes.index(node1)
@@ -1005,10 +1079,13 @@ class MediumLevelILAst(object):
             nodes_to_remove.append(node2)
             nodes_to_check.remove(node2)
         else:
-            log_debug(f'{node1} not in parent.nodes')
+            log_debug(f"{node1} not in parent.nodes")
 
     def find_c_and_R(self, cond1, cond2):
-        log_info(f"{cond1} vs {cond2}")
+        log_debug(f"{cond1} vs {cond2}")
+
+        if is_false(cond1) or is_false(cond2):
+            return False
 
         if cond1.decl().name() != "and":
             cond1 = And(cond1, BoolVal(True))
@@ -1019,16 +1096,16 @@ class MediumLevelILAst(object):
 
         while to_visit:
             current_cond, right_side = to_visit.pop()
-            log_info(f"current: {current_cond} right: {right_side}")
+            log_debug(f"current: {current_cond} right: {right_side}")
 
             # If the top level operation is not an And, we don't need
             # to go any further.
             if current_cond.decl().name() != "and":
-                log_info(f"current_cond is {current_cond}")
+                log_debug(f"current_cond is {current_cond}")
                 return False
 
             if current_cond.num_args() < 2:
-                log_info(f"current_cond is {current_cond}")
+                log_debug(f"current_cond is {current_cond}")
                 return False
 
             # try 0 and R first
@@ -1041,9 +1118,9 @@ class MediumLevelILAst(object):
             if R.num_args() == 0:
                 R = BoolVal(True)
 
-            log_info(f"c: {c} R: {R} cond2: {cond2}")
+            log_debug(f"c: {c} R: {R} cond2: {cond2}")
             if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
-                log_info(
+                log_debug(
                     f"Found complex if/else (0-1)! {R} and {c} | {cond2}"
                 )
                 return c, R
@@ -1057,9 +1134,9 @@ class MediumLevelILAst(object):
             )
             if R.num_args() == 0:
                 R = BoolVal(True)
-            log_info(f"c: {c} R: {R} cond2: {cond2}")
+            log_debug(f"c: {c} R: {R} cond2: {cond2}")
             if not Tactic("ctx-solver-simplify")(And(Not(c), R) == cond2)[0]:
-                log_info(
+                log_debug(
                     f"Found complex if/else (1-0)! {R} and {c} | {cond2}"
                 )
                 return c, R
@@ -1070,6 +1147,42 @@ class MediumLevelILAst(object):
             ]
 
         return False
+
+    def _fold_conditions(self):
+        root = self.regions[0][1]
+
+        if root.type == "seq":
+            nodes = root.nodes
+        elif root.type == "loop":
+            nodes = root.body.nodes
+
+        for i, node in enumerate(nodes):
+            if node.type != "cond" or node[False] is not None:
+                continue
+
+            deps = node[True].block[0].branch_dependence
+
+            log_debug(f"Branch Dep for {node[True].block}: {deps}")
+
+            if (
+                next(
+                    (
+                        b
+                        for b in nodes
+                        if b.start in deps and b.type != "loop" and b != node
+                    ),
+                    None,
+                )
+                is None
+            ):
+                log_debug("This block doesn't need its condition!")
+
+                nodes[i] = MediumLevelILAstSeqNode(self, node[True]._nodes)
+
+        if root.type == "seq":
+            root._nodes = nodes
+        elif root.type == "loop":
+            root.body._nodes = nodes
 
     def generate_reaching_constraints(self):
         visitor = ConditionVisitor(self.view)
@@ -1126,7 +1239,7 @@ class MediumLevelILAst(object):
                 self._reaching_constraints[(start, end)] = reaching_constraint
 
     def _refine_loops(self):
-        log_info("_refine_loops")
+        log_debug("_refine_loops")
 
         to_visit = [r for r in self._regions.values()]
 
@@ -1139,7 +1252,7 @@ class MediumLevelILAst(object):
                 continue
 
             if node in visited:
-                log_info(f"wtf, why have I visited {node} already")
+                log_debug(f"wtf, why have I visited {node} already")
                 break
 
             if node.type == "seq":
@@ -1149,142 +1262,203 @@ class MediumLevelILAst(object):
                 to_visit += node[False].nodes if node[False] else []
 
             if node.type == "loop":
-                log_info(f"{node}")
+                log_debug(f"{node}")
 
                 generate_graph(
                     self.view,
                     node,
                     self.report_collection,
-                    f'    {node.start} before refining'
+                    f"    {node.start} before refining",
                 )
 
                 while_condition = self._check_while(node)
                 if while_condition is not None:
-                    log_info(f"{node} is a while loop")
-                    node.loop_type = "while"
-                    node.condition = reduce(
-                        And,
-                        Tactic("ctx-solver-simplify")(Not(while_condition))[0],
-                    )
-
-                    break_cond = node.body.nodes[0]
-
-                    if break_cond[False] is not None:
-                        node.body._nodes[0] = break_cond[False]
-
-                    # Flatten condition nodes that have the same condition
-                    # as the loop condition
-                    for idx, child in enumerate(node.body.nodes):
-                        if (
-                            isinstance(child, MediumLevelILAstCondNode)
-                            and is_true(
-                                simplify(child.condition == node.condition)
-                            )
-                            and child[False] is None
-                        ):
-                            node.body._nodes[idx] = child[True]
-                    continue
+                    self._convert_to_while_loop(node, while_condition)
 
                 dowhile_condition = self._check_do_while(node)
                 if dowhile_condition is not None:
-                    log_info(f"{node} is a do while loop")
-                    node.loop_type = "dowhile"
-                    node.condition = reduce(
-                        And,
-                        Tactic("ctx-solver-simplify")(Not(dowhile_condition))[
-                            0
-                        ],
-                    )
-
-                    break_cond = node.body.nodes[-1]
-
-                    if break_cond[False] is not None:
-                        node.body._nodes[-1] = break_cond[False]
-                    else:
-                        node.body._nodes.pop()
-
-                    # Flatten condition nodes that have the same condition
-                    # as the loop condition
-                    for idx, child in enumerate(node.body.nodes):
-                        if (
-                            isinstance(child, MediumLevelILAstCondNode)
-                            and is_true(
-                                simplify(child.condition == node.condition)
-                            )
-                            and child[False] is None
-                        ):
-                            node.body._nodes[idx] = child[True]
-
-                        log_info(f"Checking {child} for break condition")
-                        if (
-                            isinstance(child, MediumLevelILAstCondNode)
-                            and is_false(
-                                simplify(And(child.condition, node.condition))
-                            )
-                        ):
-                            is_complex_if = self.find_c_and_R(Not(child.condition), node.condition)
-
-                            if is_complex_if:
-                                c, R = is_complex_if
-                                log_info(f'Found c: {c} R: {R}')
-                                child[True]._nodes.append(
-                                    MediumLevelILAstBreakNode(
-                                        self,
-                                        child[True].nodes[-1].block[-1].instr_index,
-                                        child[True].nodes[-1].block[-1].address
-                                    )
-                                )
-                            else:
-                                child[True]._nodes.append(
-                                    MediumLevelILAstBreakNode(
-                                        self,
-                                        child[True].nodes[-1].block[-1].instr_index,
-                                        child[True].nodes[-1].block[-1].address
-                                    )
-                                )
+                    self._convert_to_do_while_loop(node, dowhile_condition)
 
                 generate_graph(
                     self.view,
                     node,
                     self.report_collection,
-                    f'    {node.start} after refining'
+                    f"    {node.start} after refining",
                 )
 
+                to_visit += [n for n in node.body.nodes if n is not None]
+
     def _check_while(self, loop_node: MediumLevelILAstLoopNode):
-        log_info("_check_while")
+        log_debug("_check_while")
         if loop_node.loop_type != "endless":
-            log_info(loop_node.loop_type)
+            log_debug(loop_node.loop_type)
             return None
 
         if loop_node.body.nodes[0].type != "cond":
-            log_info(f"{loop_node.body.nodes[0].type}")
+            log_debug(f"{loop_node.body.nodes[0].type}")
             return None
 
-        log_info(f"{loop_node.body.nodes[0][True].nodes}")
+        log_debug(f"{loop_node.body.nodes[0][True].nodes}")
 
         if loop_node.body.nodes[0][True].nodes[0].type == "break":
-            log_info(f"The loop body is {loop_node.body.nodes}")
+            log_debug(f"The loop body is {loop_node.body.nodes}")
             return loop_node.body.nodes[0].condition
 
-        log_info(f"{loop_node.body.nodes[0][True].nodes}")
+        log_debug(f"{loop_node.body.nodes[0][True].nodes}")
 
         return None
 
+    def _convert_to_while_loop(
+        self, node: MediumLevelILAstLoopNode, while_condition
+    ):
+        log_debug(f"{node} is a while loop")
+        node.loop_type = "while"
+        node.condition = reduce(
+            And, Tactic("ctx-solver-simplify")(Not(while_condition))[0]
+        )
+
+        break_cond = node.body.nodes[0]
+
+        if break_cond[False] is not None:
+            node.body._nodes[0] = break_cond[False]
+
+        # Flatten condition nodes that have the same condition
+        # as the loop condition
+        for idx, child in enumerate(node.body.nodes):
+            if (
+                isinstance(child, MediumLevelILAstCondNode)
+                and is_true(simplify(child.condition == node.condition))
+                and child[False] is None
+            ):
+                node.body._nodes[idx] = child[True]
+
     def _check_do_while(self, loop_node: MediumLevelILAstLoopNode) -> bool:
-        log_info("_check_do_while")
-        log_info(f"{loop_node.body.nodes}")
+        log_debug("_check_do_while")
+        log_debug(f"{loop_node.body.nodes}")
         if loop_node.loop_type != "endless":
-            log_info(loop_node.loop_type)
+            log_debug(loop_node.loop_type)
             return None
 
         if loop_node.body.nodes[-1].type != "cond":
-            log_info(f"final node is: {loop_node.body.nodes[-1].type}")
+            log_debug(f"final node is: {loop_node.body.nodes[-1].type}")
             return None
 
-        log_info(f"final cond true node: {loop_node.body.nodes[-1][True].nodes}")
+        log_debug(
+            f"final cond true node: {loop_node.body.nodes[-1][True].nodes}"
+        )
 
         if loop_node.body.nodes[-1][True].nodes[0].type == "break":
             return loop_node.body.nodes[-1].condition
+
+        return None
+
+    def _convert_to_do_while_loop(
+        self, node: MediumLevelILAstLoopNode, dowhile_condition
+    ):
+        log_debug(f"{node} is a do while loop")
+        node.loop_type = "dowhile"
+        node.condition = reduce(
+            And, Tactic("ctx-solver-simplify")(Not(dowhile_condition))[0]
+        )
+
+        break_cond = node.body.nodes[-1]
+
+        if break_cond[False] is not None:
+            node.body._nodes[-1] = break_cond[False]
+        else:
+            node.body._nodes.pop()
+
+        # Flatten condition nodes that have the same condition
+        # as the loop condition
+        for idx, child in enumerate(node.body.nodes):
+            if (
+                isinstance(child, MediumLevelILAstCondNode)
+                and is_true(simplify(child.condition == node.condition))
+                and child[False] is None
+            ):
+                node.body._nodes[idx] = child[True]
+
+            log_debug(f"Checking {child} for break condition")
+            if isinstance(child, MediumLevelILAstCondNode) and is_false(
+                simplify(And(child.condition, node.condition))
+            ):
+                break_instr = child[True].nodes[-1].block[-1]
+
+                child[True]._nodes.append(
+                    MediumLevelILAstBreakNode(
+                        self, break_instr.instr_index, break_instr.address
+                    )
+                )
+
+                new_loop_condition = self._split_break_condition(
+                    node.condition, child.condition
+                )
+
+                if new_loop_condition is not None:
+                    log_debug(f"new_loop_condition is {new_loop_condition}")
+                    node.condition = new_loop_condition
+
+    def _split_break_condition(self, loop_condition, break_condition):
+        log_debug(f"{loop_condition} vs {break_condition}")
+
+        if loop_condition.decl().name() != "and":
+            loop_condition = And(loop_condition, BoolVal(True))
+
+        to_visit = [(loop_condition, BoolVal(True))]
+
+        while to_visit:
+            current_cond, right_side = to_visit.pop()
+            log_debug(f"current: {current_cond} right: {right_side}")
+
+            # If the top level operation is not an And, we don't need
+            # to go any further.
+            if current_cond.decl().name() != "and":
+                log_debug(f"current_cond is {current_cond}")
+                return None
+
+            if current_cond.num_args() < 2:
+                log_debug(f"current_cond is {current_cond}")
+                return None
+
+            # try 0 and R first
+            c = current_cond.arg(0)
+            R = And(
+                *Tactic("ctx-solver-simplify")(
+                    And(current_cond.arg(1), right_side)
+                )[0]
+            )
+            if R.num_args() == 0:
+                R = BoolVal(True)
+
+            log_debug(f"c: {c} R: {R} break_condition: {break_condition}")
+            if not Tactic("ctx-solver-simplify")(c == Not(break_condition))[0]:
+                log_debug(
+                    f"Found break condition (0-1)! "
+                    f"{R} and {c} | {break_condition}"
+                )
+                return simplify(R)
+
+            # try again, but the other way
+            c = current_cond.arg(1)
+            R = And(
+                *Tactic("ctx-solver-simplify")(
+                    And(current_cond.arg(0), right_side)
+                )[0]
+            )
+            if R.num_args() == 0:
+                R = BoolVal(True)
+            log_debug(f"c: {c} R: {R} break_condition: {break_condition}")
+            if not Tactic("ctx-solver-simplify")(c == Not(break_condition))[0]:
+                log_debug(
+                    f"Found break condition (1-0)! "
+                    f"{R} and {c} | {break_condition}"
+                )
+                return simplify(R)
+
+            to_visit = [
+                (current_cond.arg(0), current_cond.arg(1)),
+                (current_cond.arg(1), current_cond.arg(0)),
+            ]
 
         return None
 
