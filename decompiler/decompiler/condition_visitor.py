@@ -81,7 +81,8 @@ class ConditionVisitor(BNILVisitor):
 
     def visit_MLIL_CMP_SLT(self, expr):
         left, right = self.visit_both_sides(expr)
-
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
         return left < right
 
     def visit_MLIL_CMP_SGT(self, expr):
@@ -155,10 +156,7 @@ class ConditionVisitor(BNILVisitor):
             if sub_register is None:
                 # This means that the variable was probably renamed, and it's
                 # still just a register access.
-                if expr.src.type.width == size:
-                    sub_register = expr.src.name
-                else:
-                    raise NotImplementedError()
+                sub_register = expr.src.name
 
             return BitVec(sub_register, size * 8)
 
@@ -179,10 +177,20 @@ class ConditionVisitor(BNILVisitor):
         return Not(self.visit(expr.src))
 
     def visit_MLIL_AND(self, expr):
-        return And(*self.visit_both_sides(expr))
+        left, right = self.visit_both_sides(expr)
+
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
+
+        return left & right
 
     def visit_MLIL_OR(self, expr):
-        return Or(*self.visit_both_sides(expr))
+        left, right = self.visit_both_sides(expr)
+
+        if right.size() != left.size():
+            right = ZeroExt(left.size() - right.size(), right)
+
+        return left | right
 
     def visit_MLIL_ADD(self, expr):
         left, right = self.visit_both_sides(expr)
@@ -199,7 +207,7 @@ class ConditionVisitor(BNILVisitor):
         else:
             var_name = expr.function.arch.get_reg_by_index(expr.src.storage)
 
-        print(f'var_name: {repr(var_name)}')
+        log_debug(f'var_name: {repr(var_name)}')
         return BitVec(
             f"&{var_name}",
             (expr.size * 8)

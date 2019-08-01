@@ -148,7 +148,7 @@ class MediumLevelILAst(object):
             self._regions.items(),
             key=cmp_to_key(
                 lambda i, j: 1
-                if self.reaching_conditions.get((i[0], j[0])) is None
+                if self.reaching_conditions.get((i[0].start, j[0].start)) is None
                 else -1
             ),
         )
@@ -167,18 +167,18 @@ class MediumLevelILAst(object):
         for i in range(len(sorted_cases)):
             for j in range(i, len(sorted_cases)):
                 if self.reaching_conditions.get(
-                    (sorted_cases[i].block, sorted_cases[j].block)
+                    (sorted_cases[i].start, sorted_cases[j].start)
                 ):
                     log_debug(
-                        f"i->j {self.reaching_conditions[(sorted_cases[i].block,sorted_cases[j].block)]}"
+                        f"i->j {self.reaching_conditions[(sorted_cases[i].start,sorted_cases[j].start)]}"
                     )
                     fallsthrough[i] = fallsthrough.get(i, list())
                     fallsthrough[i].append(j)
                 elif self.reaching_conditions.get(
-                    (sorted_cases[j].block, sorted_cases[i].block)
+                    (sorted_cases[j].start, sorted_cases[i].start)
                 ):
                     log_debug(
-                        f"j->i {self.reaching_conditions[(sorted_cases[j].block,sorted_cases[i].block)]}"
+                        f"j->i {self.reaching_conditions[(sorted_cases[j].start,sorted_cases[i].start)]}"
                     )
                     fallsthrough[j] = fallsthrough.get(j, list())
                     fallsthrough[j].append(i)
@@ -239,7 +239,7 @@ class MediumLevelILAst(object):
             log_debug(f"checking {node.block}")
 
             reaching_conditions = self.reaching_conditions.get(
-                (bb, node.block)
+                (bb.start, node.start)
             )
 
             if reaching_conditions is None:
@@ -274,6 +274,11 @@ class MediumLevelILAst(object):
         # TODO: add temporary node such that no_return nodes
         # think that they drop into the next region
 
+        outgoing_edges = {
+            bb.start: bb.outgoing_edges
+            for bb in self._function.basic_blocks
+        }
+
         reaching_conditions = {}
 
         visited_nodes = set()
@@ -283,82 +288,83 @@ class MediumLevelILAst(object):
         def dfs_next_edge(bb, target):
             log_debug(f"--dfs_next_edge({bb})--")
 
-            for o in bb.outgoing_edges:
-                log_debug(f"yielding {o}")
+            for o in outgoing_edges[bb]:
+                # log_info(f"yielding {o}")
                 yield o
                 if not o.back_edge:
-                    if o.target == target:
+                    if o.target.start == target:
                         continue
-                    for t in dfs_next_edge(o.target, target):
+                    for t in dfs_next_edge(o.target.start, target):
                         yield t
 
         for ns, ne in product(self.order_basic_blocks(), repeat=2):
             if ns == ne:
                 continue
 
-            log_debug(f"({ns}, {ne})")
+            # log_info(f"({ns}, {ne})")
 
             dfs_stack = []
             visited_edges = set()
             visited_nodes = set()
 
-            for e in dfs_next_edge(ns, ne):
-                log_debug(f"    {e.type!r} {e.source} -> {e.target}")
+            for e in dfs_next_edge(ns.start, ne.start):
+                # log_info(f"    {e.type!r} {e.source} -> {e.target}")
 
                 nt = e.target
 
                 if e.back_edge:
-                    visited_edges.add(e)
+                    visited_edges.add((e.source.start, e.target.start))
 
-                if e in visited_edges:
-                    log_debug(f"    edge in visited_edges")
-
-                elif e not in visited_edges and nt not in visited_nodes:
-                    log_debug(f"    adding edge to edges")
-                    visited_edges.add(e)
-                    visited_nodes.add(nt)
+                if (e.source.start, e.target.start) in visited_edges:
+                    # log_info(f"    edge in visited_edges")
+                    pass
+                elif (e.source.start, e.target.start) not in visited_edges and nt.start not in visited_nodes:
+                    # log_info(f"    adding edge to edges")
+                    visited_edges.add((e.source.start, e.target.start))
+                    visited_nodes.add(nt.start)
                     dfs_stack = dfs_stack + [e]
 
                     if nt == ne and dfs_stack:
-                        log_debug(f"{nt} == {ne}")
-                        log_debug("    adding finished slice")
+                        # log_info(f"{nt} == {ne}")
+                        # log_info("    adding finished slice")
                         reaching_conditions[
-                            (ns, ne)
-                        ] = reaching_conditions.get((ns, ne), list())
-                        reaching_conditions[(ns, ne)].append(dfs_stack)
+                            (ns.start, ne.start)
+                        ] = reaching_conditions.get((ns.start, ne.start), list())
+                        reaching_conditions[(ns.start, ne.start)].append(dfs_stack)
 
-                elif (nt, ne) in reaching_conditions and e not in dfs_stack:
-                    log_debug("    hit simple path, adding finished slice")
-                    reaching_conditions[(ns, ne)] = reaching_conditions.get(
-                        (ns, ne), list()
+                elif (nt.start, ne.start) in reaching_conditions and e not in dfs_stack:
+                    # log_info("    hit simple path, adding finished slice")
+                    reaching_conditions[(ns.start, ne.start)] = reaching_conditions.get(
+                        (ns.start, ne.start), list()
                     )
 
-                    reaching_conditions[(ns, ne)].append(dfs_stack)
-                    visited_edges.add(e)
+                    reaching_conditions[(ns.start, ne.start)].append(dfs_stack)
+                    visited_edges.add((e.source.start, e.target.start))
 
                 if dfs_stack:
-                    log_debug(f"    {dfs_stack}")
+                    # log_info(f"    {dfs_stack}")
+                    pass
                 while len(dfs_stack) and all(
-                    descendant.target in visited_nodes
+                    descendant.target.start in visited_nodes
                     or descendant.source == ne
                     or descendant.back_edge
-                    for descendant in dfs_stack[-1].target.outgoing_edges
+                    for descendant in outgoing_edges.get(dfs_stack[-1].target, [])
                 ):
-                    log_debug(f"    popping {dfs_stack[-1]}")
+                    # log_info(f"    popping {dfs_stack[-1]}")
                     dfs_stack = dfs_stack[:-1]
 
-                visited_nodes.remove(ne) if ne in visited_nodes else None
+                visited_nodes.remove(ne.start) if ne.start in visited_nodes else None
 
-            if (ns, ne) in reaching_conditions:
+            if (ns.start, ne.start) in reaching_conditions:
                 graph_slice(
                     self.view,
                     ns,
                     ne,
-                    reaching_conditions[(ns, ne)],
+                    reaching_conditions[(ns.start, ne.start)],
                     self.report_collection,
                 )
-                log_debug(f"finished slices: {reaching_conditions[(ns, ne)]}")
-                log_debug("-----------")
+                # log_info(f"finished slices: {reaching_conditions[(ns.start, ne.start)]}")
+                # log_info("-----------")
 
         self._reaching_conditions = reaching_conditions
 
@@ -527,7 +533,7 @@ class MediumLevelILAst(object):
         possible_region = {
             MediumLevelILAstBasicBlockNode(self, pr)
             for pr in self._function.basic_blocks
-            if (bb, pr) in self.reaching_conditions
+            if (bb.start, pr.start) in self.reaching_conditions
         }
 
         nodes = [MediumLevelILAstBasicBlockNode(self, bb)]
@@ -579,7 +585,7 @@ class MediumLevelILAst(object):
                 # if there are no reaching conditions, then
                 # this doesn't fall through. Insert a break node.
                 if all(
-                    self.reaching_conditions.get((case.block, other.block))
+                    self.reaching_conditions.get((case.start, other.start))
                     is None
                     for other in current_node._cases
                 ):
@@ -617,7 +623,7 @@ class MediumLevelILAst(object):
             n
             for l in latching_nodes
             if bb != l
-            for s in self.reaching_conditions[(bb, l)]
+            for s in self.reaching_conditions[(bb.start, l.start)]
             for n in s
         }
         loop_nodes = set()
@@ -625,6 +631,8 @@ class MediumLevelILAst(object):
         for e in loop_slice:
             loop_nodes.add(e.target)
             loop_nodes.add(e.source)
+
+        log_debug(f'original loop_nodes: {loop_nodes}')
 
         successor_nodes = {
             e.target
@@ -709,10 +717,10 @@ class MediumLevelILAst(object):
             log_debug(f"Removing {sub_region} from loop_nodes")
             self.remove_sub_region_nodes(sub_region, sorted_loop_nodes)
 
-            for n in loop_nodes:
-                log_debug(f"Removing {n} from bb_queue")
-                if n.block in bb_queue:
-                    bb_queue.remove(n.block)
+        for n in loop_nodes:
+            log_debug(f"Removing {n} from bb_queue")
+            if n.block in bb_queue:
+                bb_queue.remove(n.block)
 
         log_debug("Adding break nodes for successors")
 
@@ -721,7 +729,7 @@ class MediumLevelILAst(object):
         for successor in successor_nodes:
             log_debug(f"successor: {successor}")
             reaching_constraint = self._reaching_constraints.get(
-                (bb, successor)
+                (bb.start, successor.start)
             )
             break_node = MediumLevelILAstCondNode(
                 self,
@@ -752,7 +760,7 @@ class MediumLevelILAst(object):
             if len(successor_nodes) > 1:
                 successor_cond = MediumLevelILAstCondNode(
                     self,
-                    self.reaching_constraints.get((bb, successor)),
+                    self.reaching_constraints.get((bb.start, successor.start)),
                     successor.source_block[0],
                     successor_node,
                     successor_cond,
@@ -782,12 +790,12 @@ class MediumLevelILAst(object):
         sub_region: MediumLevelILAstNode,
         current_node: MediumLevelILAstNode,
         cases: dict,
-        nodes: list,
+        nodes: list
     ):
         log_debug(
             f"create_new_node_from_region({bb}, {block}, {sub_region}, {current_node})"
         )
-        reaching_constraint = self._reaching_constraints.get((bb, block))
+        reaching_constraint = self._reaching_constraints.get((bb.start, block.start))
 
         if is_true(reaching_constraint):
             reaching_constraint = None

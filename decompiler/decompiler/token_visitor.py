@@ -2,7 +2,7 @@ from itertools import chain
 
 from binaryninja import (InstructionTextToken, InstructionTextTokenType,
                          MediumLevelILOperation, SymbolType, TypeClass,
-                         Variable)
+                         Variable, log)
 
 from .bnilvisitor import BNILVisitor
 
@@ -135,7 +135,7 @@ class TokenVisitor(BNILVisitor):
             ]
 
     def visit_MLIL_CALL(self, expr):
-        print(f'visit_MLIL_CALL: {expr}')
+        log.log_debug(f'visit_MLIL_CALL: {expr}')
         output = [
             InstructionTextToken(
                 InstructionTextTokenType.LocalVariableToken,
@@ -155,9 +155,9 @@ class TokenVisitor(BNILVisitor):
                 )
             )
 
-        print(f'output: {output}')
-        print(f'dest: {dest}')
-        print(f'params: {list(chain(*params))}')
+        log.log_debug(f'output: {output}')
+        log.log_debug(f'dest: {dest}')
+        log.log_debug(f'params: {list(chain(*params))}')
 
         return [
             *output,
@@ -190,8 +190,11 @@ class TokenVisitor(BNILVisitor):
             *right
         ]
 
+    def visit_MLIL_ZX(self, expr):
+        return self.visit(expr.src)
+
     def visit_MLIL_CONST_PTR(self, expr):
-        print(f'MLIL_CONST_PTR: {expr.constant:x}')
+        log.log_debug(f'MLIL_CONST_PTR: {expr.constant:x}')
         view = expr.function.source_function.view
         symbol = view.get_symbol_at(expr.constant)
         string = view.get_string_at(expr.constant)

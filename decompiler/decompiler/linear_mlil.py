@@ -29,6 +29,7 @@ from binaryninja import (
     Settings,
     log_debug,
     Variable,
+    log
 )
 from binaryninja.enums import (
     # DisassemblyOption,
@@ -69,7 +70,6 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
         if self.function is not None:
             self.setFunction(self.function)
         self.updateLines()
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
 
     def generateLines(self):
         if self.function is None:
@@ -541,9 +541,8 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
 
         return result
 
-
     def eliminate_unused_vars(self, lines):
-        log_debug("eliminate_unused_vars")
+        log.log_info("eliminate_unused_vars")
 
         lines_to_remove = []
         instructions_removed = True
@@ -633,6 +632,48 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
                                     indices_removed.add(il.instr_index)
                                     instructions_removed = True
 
+                    if il.src.operation == MediumLevelILOperation.MLIL_VAR:
+                        log.log_info(f'{il}')
+                        if all(
+                            use.instr_index == il.instr_index
+                            for use in il.function.get_ssa_var_uses(
+                                il.ssa_form.src.src
+                            )
+                        ):
+                            new_def = il.function.get_ssa_var_definition(il.ssa_form.src.src)
+                            if new_def is None:
+                                continue
+
+                            log.log_info(f'{il} -> {new_def}')
+
+                            lines_to_remove.append(line)
+                            indices_removed.add(il.instr_index)
+                            instructions_removed = True
+
+                            # TODO: make this not naive. A dictionary maybe?
+                            new_line = next(
+                                l for l in lines
+                                if l.contents.il_instruction is not None and
+                                l.contents.il_instruction.instr_index == new_def.instr_index
+                            )
+                            token_idx = next(
+                                i
+                                for i, t in enumerate(new_line.contents.tokens)
+                                if t.value == il.src.src.identifier
+                            )
+
+                            new_line.contents.tokens = (
+                                new_line.contents.tokens[:token_idx] +
+                                [
+                                    InstructionTextToken(
+                                        InstructionTextTokenType.LocalVariableToken,
+                                        il.dest.name,
+                                        il.dest.identifier
+                                    )
+                                ] +
+                                new_line.contents.tokens[token_idx+1:]
+                            )
+
         for line in lines:
             if (line.type ==
                     LinearDisassemblyLineType.LocalVariableLineType):
@@ -654,8 +695,11 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
                 ):
                     lines_to_remove.append(line)
 
+        print(f'before lines_to_remove: {self.function.name} {len(lines)}')
         for line in lines_to_remove:
+            # print(line)
             lines.remove(line)
+        print(f'after lines_to_remove: {len(lines)}')
 
         return lines
 
@@ -670,7 +714,7 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
     function_update_requested = function_updated
 
     def updateLines(self):
-        log_debug("updateLines")
+        log.log_info("updateLines")
         lines = self.generateLines()
         lines = self.eliminate_unused_vars(lines)
         self.setUpdatedLines(lines)
@@ -692,7 +736,7 @@ class LinearMLILView(TokenizedTextView, BinaryDataNotification):
 
         self.function = func
         self.setFunction(self.function)
-        self.setLines(self.generateLines())
+        self.updateLines()
         return True
 
     def getHistoryEntry(self):

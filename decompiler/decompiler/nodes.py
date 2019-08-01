@@ -43,10 +43,10 @@ class MediumLevelILAstNode(object):
             True
             if (
                 self._ast.reaching_conditions.get(
-                    (self.block, other.block)
+                    (self.start, other.start)
                 ) is not None and
                 self._ast.reaching_conditions.get(
-                    (other.block, self.block)
+                    (other.start, self.start)
                 ) is None
             ) else True
             if self.start < other.start
@@ -59,7 +59,7 @@ class MediumLevelILAstNode(object):
         log_debug("__le__")
         return (
             True
-            if self._ast.reaching_conditions.get((self, other)) is not None
+            if self._ast.reaching_conditions.get((self.start, other.start)) is not None
             else False
         )
 
@@ -67,7 +67,7 @@ class MediumLevelILAstNode(object):
         log_debug("__gt__")
         return (
             True
-            if self._ast.reaching_conditions.get((other, self)) is not None
+            if self._ast.reaching_conditions.get((other.start, self.start)) is not None
             else False
         )
 
@@ -75,7 +75,7 @@ class MediumLevelILAstNode(object):
         log_debug("__ge__")
         return (
             True
-            if self._ast.reaching_conditions.get((other, self)) is not None
+            if self._ast.reaching_conditions.get((other.start, self.start)) is not None
             else False
         )
 
@@ -466,14 +466,14 @@ class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):
             True
             if (
                 self._ast.reaching_conditions.get(
-                    (self.block, other.block)
+                    (self.start, other.start)
                 ) is not None and
                 self._ast.reaching_conditions.get(
-                    (other.block, self.block)
+                    (other.start, self.start)
                 ) is None
             ) else False
             if self._ast.reaching_conditions.get(
-                (self.block, other.block)
+                (self.start, other.start)
             ) is None
             else True
             if self.start < other.start
@@ -487,14 +487,14 @@ class MediumLevelILAstBasicBlockNode(MediumLevelILAstNode):
             True
             if (
                 self._ast.reaching_conditions.get(
-                    (other.block, self.block)
+                    (other.start, self.start)
                 ) is not None and
                 self._ast.reaching_conditions.get(
-                    (self.block, other.block)
+                    (self.start, other.start)
                 ) is None
             ) else False
             if self._ast.reaching_conditions.get(
-                (other.block, self.block)
+                (other.start, self.start)
             ) is None
             else True
             if self.start > other.start
