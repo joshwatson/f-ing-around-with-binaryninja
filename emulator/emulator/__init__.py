@@ -1,9 +1,11 @@
 __all__ = [
     'Executor',
     'State',
-    'UninitializedRegisterError'
+    'UninitializedRegisterError',
+    'InvalidMemoryError',
+    'InvalidInstructionError'
 ]
 
 from .executor import Executor
 from .state import State
-from .errors import UninitializedRegisterError
+from .errors import UninitializedRegisterError, InvalidMemoryError, InvalidInstructionError
