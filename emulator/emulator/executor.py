@@ -16,6 +16,14 @@ class Executor:
         pass
 
     @abc.abstractmethod
+    def read_flag(self, flag: str) -> int:
+        pass
+
+    @abc.abstractmethod
+    def write_flag(self, flag: str, value: int) -> None:
+        pass
+
+    @abc.abstractmethod
     def read_memory(self, address: int, size: int) -> int:
         pass
 
@@ -52,6 +60,16 @@ class Executor:
                 dest = stack2.pop()
                 value, _ = stack2.pop()
                 self.write_register(dest.name, value)
+
+            elif op.operation == LowLevelILOperation.LLIL_SET_FLAG:
+                dest = stack2.pop()
+                value, _ = stack2.pop()
+                self.write_flag(dest.name, value)
+
+            elif op.operation == LowLevelILOperation.LLIL_FLAG:
+                flag = stack2.pop()
+                value = self.read_flag(flag.name)
+                stack2.append((value, op.size))
 
             elif op.operation in (
                 LowLevelILOperation.LLIL_CONST,
@@ -96,11 +114,11 @@ class Executor:
                 sp = self.read_register(
                     il.function.source_function.arch.stack_pointer
                 )
-                self.write_memory(sp, value, op.size)
                 self.write_register(
                     il.function.source_function.arch.stack_pointer,
                     sp - op.size
                 )
+                self.write_memory(sp - op.size, value, op.size)
 
             elif op.operation == LowLevelILOperation.LLIL_POP:
                 sp = self.read_register(
@@ -125,7 +143,6 @@ class Executor:
                 right, _ = stack2.pop()
                 if right & (1 << ((op.size - 1) * 8)):
                     right += -(1 << (op.size * 8))
-                print(f'{left:x} s>= {right:x}')
                 result = left >= right
                 stack2.append((result, op.size))
 
@@ -136,7 +153,6 @@ class Executor:
                 right, _ = stack2.pop()
                 if right & (1 << ((op.size - 1) * 8)):
                     right += -(1 << (op.size * 8))
-                print(f'{left:x} == {right:x}')
                 result = left == right
                 stack2.append((result, op.size))
 
@@ -147,7 +163,6 @@ class Executor:
                 right, _ = stack2.pop()
                 if right & (1 << ((op.size - 1) * 8)):
                     right += -(1 << (op.size * 8))
-                print(f'{left:x} == {right:x}')
                 result = left != right
                 stack2.append((result, op.size))
 
@@ -202,7 +217,3 @@ class Executor:
 
             else:
                 raise UnimplementedOperationError(op)
-
-        # increment to the next IL instruction if it wasn't modified
-        if il.instr_index == self.current_instr_index:
-            self.set_next_instr_index(il.function, il.instr_index + 1)

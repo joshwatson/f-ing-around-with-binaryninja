@@ -1,14 +1,10 @@
-from binaryninja import (
-    BinaryView,
-    Endianness,
-    ImplicitRegisterExtend,
-    SegmentFlag,
-    LowLevelILInstruction,
-    LowLevelILFunction,
-    HighlightStandardColor,
-)
+from binaryninja import (BinaryView, Endianness, HighlightStandardColor,
+                         ImplicitRegisterExtend, LowLevelILFunction,
+                         LowLevelILInstruction, RegisterInfo, SegmentFlag,
+                         execute_on_main_thread_and_wait)
 from binaryninjaui import UIContext
-from emulator import Executor, InvalidMemoryError, UninitializedRegisterError, InvalidInstructionError
+from emulator import (Executor, InvalidInstructionError, InvalidMemoryError,
+                      UninitializedRegisterError)
 
 
 class BinaryNinjaEmulator(Executor):
@@ -20,22 +16,25 @@ class BinaryNinjaEmulator(Executor):
         self.current_highlight = None
         self.current_function = None
         self.hooks = {}
+        self.return_stack = []
+        self.flags = {}
+        self.breakpoints = set()
 
     def read_register(self, reg_name: str) -> int:
         regs = dict(self.view.session_data.get("emulator.registers", {}))
 
-        register = self.view.arch.regs.get(reg_name)
+        if reg_name.startswith('temp'):
+            register = RegisterInfo(reg_name, self.view.address_size)
+        else:
+            register = self.view.arch.regs.get(reg_name)
 
         if register is None:
             raise UninitializedRegisterError(register)
 
         full_width_reg = register.full_width_reg
 
-        if regs[full_width_reg] is None:
-            raise UninitializedRegisterError(register)
-
         if reg_name == full_width_reg:
-            return regs[reg_name]
+            return regs.get(reg_name, 0)
 
         offset = register.offset
         size = register.size
@@ -43,7 +42,7 @@ class BinaryNinjaEmulator(Executor):
         mask = (1 << (offset * 8)) - 1
         mask ^= (1 << ((size + offset) * 8)) - 1
 
-        value = regs[full_width_reg]
+        value = regs.get(full_width_reg, 0)
 
         value &= mask
 
@@ -62,7 +61,11 @@ class BinaryNinjaEmulator(Executor):
                 self.view.session_data.get("emulator.registers", [])
             )
         }
-        register = self.view.arch.regs[reg_name]
+
+        if reg_name.startswith('temp'):
+            register = RegisterInfo(reg_name, self.view.address_size)
+        else:
+            register = self.view.arch.regs[reg_name]
 
         size = register.size
         offset = register.offset
@@ -70,11 +73,22 @@ class BinaryNinjaEmulator(Executor):
         full_width_reg = register.full_width_reg
 
         if full_width_reg == reg_name:
-            if not regs:
+            if not regs or reg_name.startswith('temp'):
                 regs[reg_name] = (0, None)
-            self.view.session_data["emulator.registers.model"].startUpdate()
+            execute_on_main_thread_and_wait(
+                self.view.session_data["emulator.registers.model"].startUpdate
+            )
             registers[regs[reg_name][0]] = (reg_name, value)
-            self.view.session_data["emulator.registers.model"].endUpdate()
+            execute_on_main_thread_and_wait(
+                self.view.session_data["emulator.registers.model"].endUpdate
+            )
+
+            if reg_name == self.view.arch.stack_pointer:
+                execute_on_main_thread_and_wait(
+                    lambda: self.view.session_data[
+                        'emulator.stack.model'
+                    ].update(value)
+                )
             return
 
         full_width_value = self.read_register(full_width_reg)
@@ -112,9 +126,21 @@ class BinaryNinjaEmulator(Executor):
         if not regs:
             regs[full_width_reg] = (full_width_reg, full_width_value)
 
-        self.view.session_data["emulator.registers.model"].startUpdate()
+        execute_on_main_thread_and_wait(
+            self.view.session_data["emulator.registers.model"].startUpdate
+        )
         registers[regs[full_width_reg][0]] = (full_width_reg, full_width_value)
-        self.view.session_data["emulator.registers.model"].endUpdate()
+        execute_on_main_thread_and_wait(
+            self.view.session_data["emulator.registers.model"].endUpdate
+        )
+
+    def read_flag(self, flag_name: str) -> int:
+        flag = self.flags.get(flag_name, 0)
+
+        return flag
+
+    def write_flag(self, flag_name: str, value: int) -> None:
+        self.flags[flag_name] = value
 
     def read_memory(self, address: int, size: int) -> int:
         memory = self.view.session_data.get("emulator.memory.view")
@@ -171,9 +197,13 @@ class BinaryNinjaEmulator(Executor):
         # Implement page tables oh god
         # Otherwise we're gonna blow up memory every time we map
         # something and unmap it
-        self.view.session_data["emulator.memory.model"].beginResetModel()
+        execute_on_main_thread_and_wait(
+            self.view.session_data["emulator.memory.model"].beginResetModel
+        )
         memory.remove_user_segment(start, length)
-        self.view.session_data["emulator.memory.model"].endResetModel()
+        execute_on_main_thread_and_wait(
+            self.view.session_data["emulator.memory.model"].endResetModel
+        )
 
     def execute(self, il: LowLevelILInstruction):
         function = self.hooks.get(il.function, {})
@@ -181,14 +211,14 @@ class BinaryNinjaEmulator(Executor):
 
         if hook is None:
             super().execute(il)
-            return
 
-        ctx = UIContext.contextForWidget(
-            self.view.session_data['emulator.memory.widget']
-        )
+        else:
+            ctx = UIContext.contextForWidget(
+                self.view.session_data['emulator.memory.widget']
+            )
 
-        handler = ctx.contentActionHandler()
-        handler.executeAction(hook)
+            handler = ctx.contentActionHandler()
+            handler.executeAction(hook)
 
         if self.current_instr_index == il.instr_index:
             self.set_next_instr_index(il.function, il.instr_index + 1)
@@ -197,6 +227,7 @@ class BinaryNinjaEmulator(Executor):
         self, llil: LowLevelILFunction, instr_index: int
     ) -> None:
         self.current_instr_index = instr_index
+        self.current_function = llil
 
         if self.current_highlight is not None:
             function, addr = self.current_highlight
@@ -216,20 +247,24 @@ class BinaryNinjaEmulator(Executor):
     def invoke_call(self, il: LowLevelILInstruction, dest: int) -> None:
         # emulate a call:
         # 1. get return address
-        # 2. store return address at stack pointer
-        # 3. decrement stack pointer by address_size
+        # 2. decrement stack pointer by address_size
+        # 3. store return address at stack pointer
         # 4. set self.current_instr_index to 0
 
         # Step 1: get return address
-        return_address = self.current_function[il.instr_index + 1].address
+        self.return_stack.append(self.current_function[il.instr_index + 1])
 
-        # Step 2: store return address at stack pointer
+        # Step 2: decrement the stack pointer by address_size
         sp = self.read_register(self.view.arch.stack_pointer)
-        self.write_memory(sp, return_address, self.view.arch.address_size)
-
-        # Step 3: decrement the stack pointer by address_size
         self.write_register(
             self.view.arch.stack_pointer, sp - self.view.arch.address_size
+        )
+
+        # Step 3: store return address at stack pointer
+        self.write_memory(
+            sp - self.view.arch.address_size,
+            self.return_stack[-1].address,
+            self.view.arch.address_size
         )
 
         # Step 4: set self.current_instr_index to 0
@@ -239,19 +274,40 @@ class BinaryNinjaEmulator(Executor):
         self.set_next_instr_index(self.current_function, 0)
 
     def invoke_return(self, target: int) -> None:
-        functions = self.view.get_functions_containing(target)
-        if functions is None or len(functions) == 0:
-            raise InvalidInstructionError(target)
+        return_il = self.return_stack.pop() if self.return_stack else None
+        if return_il is not None and return_il.address == target:
+            self.set_next_instr_index(
+                return_il.function, return_il.instr_index
+            )
+        else:
+            # wipe the return stack since it's not correct anymore for some reason
+            self.return_stack = []
+            functions = self.view.get_functions_containing(target)
+            if functions is None or len(functions) == 0:
+                raise InvalidInstructionError(target)
 
-        function = functions[0]
+            function = functions[0]
 
-        llil = function.llil
+            llil = function.llil
 
-        instr = function.get_low_level_il_at(target)
+            instr = function.get_low_level_il_at(target)
 
-        self.set_next_instr_index(llil, instr.instr_index)
+            self.set_next_instr_index(llil, instr.instr_index)
+
+        # pop the return address off the stack
+        sp = self.read_register(self.view.arch.stack_pointer)
+        self.write_register(
+            self.view.arch.stack_pointer, sp + self.view.arch.address_size
+        )
 
     def add_hook(self, instruction: LowLevelILInstruction, hook: str):
         function = self.hooks.get(instruction.function, {})
         function[instruction.instr_index] = hook
+        self.hooks[instruction.function] = function
+
+    def remove_hook(self, instruction: LowLevelILInstruction) -> None:
+        function = self.hooks.get(instruction.function, {})
+        if instruction.instr_index in function:
+            del function[instruction.instr_index]
+
         self.hooks[instruction.function] = function

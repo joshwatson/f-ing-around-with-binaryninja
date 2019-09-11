@@ -2,7 +2,8 @@ from binaryninja import (BackgroundTaskThread, BinaryDataNotification,
                          BinaryView, BinaryViewType, SegmentFlag, Settings)
 from PySide2.QtCore import QAbstractTableModel, Qt
 from PySide2.QtGui import QFont
-from PySide2.QtWidgets import QHeaderView, QTableView
+from PySide2.QtWidgets import QHeaderView, QTableView, QWidget, QHBoxLayout, QApplication
+from binaryninjaui import DockContextHandler, LinearView, DockHandler
 
 
 class EmulatorMemoryModel(QAbstractTableModel, BinaryDataNotification):
@@ -130,19 +131,14 @@ def rewrite_segments(view: BinaryView):
         new_raw_view.write(current_addr, segment_data)
         current_addr += len(segment_data)
 
-    print(f'{len(new_raw_view):x}')
-
     new_view = BinaryViewType['Mapped'].create(new_raw_view)
     new_view.remove_auto_segment(0, len(new_raw_view))
     t = EmulatorBackgroundTask(new_view)
     t.start()
     t.join()
-    print(new_view.segments)
 
     current_addr = 0
     for segment in view.segments:
-        print(f'{segment.start:x}->{len(segment):x} | {current_addr:x}->{len(segment):x}')
-
         new_view.add_user_segment(
             segment.start,
             len(segment),
@@ -158,3 +154,44 @@ def rewrite_segments(view: BinaryView):
         current_addr += len(segment)
 
     return new_view
+
+
+class EmulatorMemoryDockWidget(QWidget, DockContextHandler):
+    def __init__(self, parent, name, view):
+        try:
+            QWidget.__init__(self, parent)
+            DockContextHandler.__init__(self, self, name)
+
+            view.session_data['emulator.memory.dockWidget'] = self
+
+            self.view = view
+
+            self.layout = QHBoxLayout(self)
+
+            dock_handler = DockHandler.getActiveDockHandler()
+            dock_handler.setVisible('Emulator Memory View', False)
+
+        except Exception as e:
+            print(e)
+
+    def notifyViewChanged(self, view_frame):
+        self.view_frame = view_frame
+
+    @staticmethod
+    def create_widget(name, parent, data=None):
+        return EmulatorMemoryDockWidget(parent, name, data)
+
+
+def addDockWidget():
+    if len(QApplication.allWidgets()) == 0:
+        return
+
+    mw = QApplication.allWidgets()[0].window()
+    dock_handler = mw.findChild(DockHandler, '__DockHandler')
+    dock_handler.addDockWidget(
+        "Emulator Memory View",
+        EmulatorMemoryDockWidget.create_widget,
+        Qt.RightDockWidgetArea,
+        Qt.Horizontal,
+        False
+    )

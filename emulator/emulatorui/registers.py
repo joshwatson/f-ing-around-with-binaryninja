@@ -4,6 +4,8 @@ from PySide2.QtGui import QFont
 from binaryninja import Settings
 
 
+# TODO
+# Handle temp registers
 class RegisterEmulatorModel(QAbstractTableModel):
     def __init__(self, view):
         super().__init__()
@@ -12,10 +14,9 @@ class RegisterEmulatorModel(QAbstractTableModel):
         if view.arch is None:
             view.session_data['emulator.registers'] = []
 
-        if 'emulator.registers' not in view.session_data:
-            view.session_data['emulator.registers'] = [
-                (r, None) for r in view.arch.full_width_regs
-            ]
+        view.session_data['emulator.registers'] = [
+            (r, 0) for r in view.arch.full_width_regs
+        ]
 
         view.session_data['emulator.registers.model'] = self
 
@@ -67,15 +68,8 @@ class RegisterEmulatorModel(QAbstractTableModel):
         if self.view.arch is None:
             return False
 
+        emulator = self.view.session_data['emulator']
         regs = self.view.session_data['emulator.registers']
-        print(f'setData {index}')
-        if index.column() == 0:
-            if value in self.view.arch.full_width_regs:
-                regs.append((value, None))
-                return True
-            else:
-                print(f'{value} not in full_width_regs')
-                return False
 
         if value.startswith('0x'):
             try:
@@ -87,7 +81,7 @@ class RegisterEmulatorModel(QAbstractTableModel):
         else:
             return False
 
-        regs[index.row()] = (regs[index.row()][0], value)
+        emulator.write_register(regs[index.row()][0], value)
         return True
 
     def flags(self, index):
@@ -112,3 +106,4 @@ class RegisterEmulatorView(QTableView):
         self.view = view
         self.setModel(RegisterEmulatorModel(view))
         self.horizontalHeader().show()
+        self.view.session_data['emulator.registers.widget'] = self
